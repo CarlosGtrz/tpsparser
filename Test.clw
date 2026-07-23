@@ -5,6 +5,8 @@
 
 TestTpsParserType   CLASS(TpsParserType),TYPE
 DebugWindow           PROCEDURE(STRING pFileName)
+DebugFieldType        PROCEDURE(LONG pFieldNo),STRING,PRIVATE
+DebugClarionPreview   PROCEDURE(STRING pValue,LONG pTotalLength = 0),STRING,PRIVATE
 DebugStringWindow     PROCEDURE(*STRING pValue,LONG pStart,LONG pLength,STRING pCaption),PRIVATE
 DebugHexDump          PROCEDURE(*STRING pValue,LONG pLength),*STRING,PRIVATE
                     END
@@ -121,6 +123,11 @@ TableChoiceQ                      QUEUE,PRE(DbgTable)
 NameAndNo                           STRING(160)
 TableIndex                          LONG
                                   END
+RecordViewQ                       QUEUE,PRE(DbgRecord)
+Name                                STRING(160)
+TypeName                            STRING(32)
+Value                               STRING(255)
+                                  END
 DataViewQ                         QUEUE,PRE(DbgData)
 TableNo                             LONG
 RecordNumber                        LONG
@@ -177,6 +184,11 @@ PublicIndex                       LONG
 LastTableNo                       LONG(-1)
 SelectedTableIndex                LONG
 SavedTableNo                      LONG
+RecordNumber                      LONG(1)
+RecordCount                       LONG
+FieldDimension                    LONG
+BlobLength                       LONG
+RecordValue                       ANY
 SrcViewPos                        LONG(1)
 SrcViewLen                        LONG(8192)
 SrcViewEnd                        LONG
@@ -184,6 +196,16 @@ Caption                           STRING(255)
 WindowPosition                    LONG,DIM(4),STATIC
 DebugWindow                       WINDOW('TPS Parser Debug'),AT(,,453,200),SYSTEM,MAX,FONT('Segoe UI',9),RESIZE
                                     SHEET,AT(1,1),FULL,USE(?DebugSheet),JOIN,NOSHEET,BELOW
+                                      TAB('Records'),USE(?TabRecords)
+                                        PROMPT('Table:'),AT(5,19,,11),USE(?RecordTableChoicePrompt)
+                                        LIST,AT(36,19,183,11),USE(?RecordTableChoice),VSCROLL,DROP(15),FROM(TableChoiceQ), |
+                                            FORMAT('200L(2)'),FONT('Consolas')
+                                        PROMPT('Record:'),AT(230,19,,11),USE(?RecordNumberPrompt)
+                                        SPIN(@n11),AT(270,19,60,11),USE(RecordNumber),RIGHT,IMM,RANGE(1,1),STEP(1)
+                                        LIST,AT(5,35),FULL,USE(?ListRecords),HVSCROLL,FROM(RecordViewQ), |
+                                            FORMAT('110L(2)|M~Name~@s160@70L(2)|M~Type~@s32@290L(2)|M~Value~@s255@'), |
+                                            FONT('Consolas')
+                                      END
                                       TAB('DataQ'),USE(?TabData)
                                         LIST,AT(5,19),FULL,USE(?ListData),VSCROLL,ALRT(MouseLeft2),FROM(DataViewQ), |
                                             FORMAT('34R(2)|M~Table No~C(0)@n_5@43R(2)|M~Record No~C(0)@n8@54R(2)|M' & |
@@ -241,14 +263,17 @@ DebugWindow                       WINDOW('TPS Parser Debug'),AT(,,453,200),SYSTE
   IF SelectedTableIndex > 0
     SELF.SetTable(SelectedTableIndex)
   END
+  RecordNumber = 1
   DO LoadStaticViews
   DO LoadFields
+  DO LoadRecords
 
   OPEN(DebugWindow)
   IF WindowPosition[4]
     SETPOSITION(0,WindowPosition[1],WindowPosition[2],WindowPosition[3],WindowPosition[4])
   END
   0{PROP:Text} = 'TPS Parser Debug - ' & CLIP(pFileName)
+  ?TabRecords{PROP:Text} = 'Records (' & RecordCount & ')'
   ?TabData{PROP:Text} = 'DataQ (' & RECORDS(DataViewQ) & ')'
   ?TabMemo{PROP:Text} = 'MemoQ (' & RECORDS(MemoViewQ) & ')'
   ?TabTableDef{PROP:Text} = 'TableDefQ (' & RECORDS(TableDefViewQ) & ')'
@@ -256,12 +281,20 @@ DebugWindow                       WINDOW('TPS Parser Debug'),AT(,,453,200),SYSTE
   ?TabField{PROP:Text} = 'FieldQ (' & RECORDS(FieldViewQ) & ')'
   IF SelectedTableIndex > 0
     ?TableChoice{PROP:Selected} = SelectedTableIndex
+    ?RecordTableChoice{PROP:Selected} = SelectedTableIndex
   ELSE
     DISABLE(?TableChoice)
+    DISABLE(?RecordTableChoice)
   END
+  DO UpdateRecordControls
 
   ACCEPT
     CASE EVENT()
+      OF EVENT:NewSelection
+        IF FIELD() = ?RecordNumber
+          DO LoadRecords
+          DO UpdateRecordControls
+        END
       OF EVENT:AlertKey
         IF KEYCODE() = MouseLeft2
           CASE FIELD()
@@ -327,14 +360,15 @@ DebugWindow                       WINDOW('TPS Parser Debug'),AT(,,453,200),SYSTE
     END
 
     CASE ACCEPTED()
+      OF ?RecordTableChoice
+        GET(TableChoiceQ,CHOICE(?RecordTableChoice))
+        DO SelectDebugTable
       OF ?TableChoice
         GET(TableChoiceQ,CHOICE(?TableChoice))
-        IF ~ERRORCODE() AND SELF.SetTable(DbgTable:TableIndex) = 0
-          SelectedTableIndex = DbgTable:TableIndex
-          DO LoadFields
-          ?TabField{PROP:Text} = 'FieldQ (' & RECORDS(FieldViewQ) & ')'
-          DISPLAY(?ListField)
-        END
+        DO SelectDebugTable
+      OF ?RecordNumber
+        DO LoadRecords
+        DO UpdateRecordControls
       OF ?ViewSource
         IF SELF.SrcLen <= 0 OR (SELF.Src &= NULL)
           MESSAGE('No loaded source is available.','TPS Parser Debug')
@@ -387,6 +421,79 @@ LoadTableChoices    ROUTINE
     DbgTable:TableIndex = I
     DbgTable:NameAndNo = CLIP(SELF.GetTableName(I)) & ' (' & I & ')'
     ADD(TableChoiceQ)
+  END
+
+SelectDebugTable    ROUTINE
+  IF ~ERRORCODE() AND SELF.SetTable(DbgTable:TableIndex) = 0
+    SelectedTableIndex = DbgTable:TableIndex
+    RecordNumber = 1
+    DO LoadFields
+    DO LoadRecords
+    ?TableChoice{PROP:Selected} = SelectedTableIndex
+    ?RecordTableChoice{PROP:Selected} = SelectedTableIndex
+    ?TabField{PROP:Text} = 'FieldQ (' & RECORDS(FieldViewQ) & ')'
+    ?TabRecords{PROP:Text} = 'Records (' & RecordCount & ')'
+    DISPLAY(?ListField)
+    DO UpdateRecordControls
+  END
+
+UpdateRecordControls ROUTINE
+  ?RecordNumber{PROP:RangeLow} = 1
+  IF RecordCount > 0
+    ?RecordNumber{PROP:RangeHigh} = RecordCount
+    ENABLE(?RecordNumber)
+  ELSE
+    RecordNumber = 1
+    ?RecordNumber{PROP:RangeHigh} = 1
+    DISABLE(?RecordNumber)
+  END
+  DISPLAY(?RecordNumber)
+  DISPLAY(?ListRecords)
+
+LoadRecords         ROUTINE
+  FREE(RecordViewQ)
+  RecordCount = SELF.Records()
+  IF RecordCount < 1
+    EXIT
+  END
+  IF RecordNumber < 1
+    RecordNumber = 1
+  END
+  IF RecordNumber > RecordCount
+    RecordNumber = RecordCount
+  END
+  IF SELF.Get(RecordNumber) <> 0
+    EXIT
+  END
+  LOOP I = 1 TO SELF.Fields()
+    GET(SELF.FieldQ,I)
+    FieldDimension = SELF.FieldQ.Elements
+    IF FieldDimension < 1
+      FieldDimension = 1
+    END
+    LOOP J = 1 TO FieldDimension
+      CLEAR(RecordViewQ)
+      DbgRecord:Name = SELF.GetFieldNameByNumber(I)
+      IF FieldDimension > 1
+        DbgRecord:Name = CLIP(DbgRecord:Name) & '[' & J & ']'
+      END
+      DbgRecord:TypeName = SELF.DebugFieldType(I)
+      GET(SELF.FieldQ,I)
+      IF SELF.FieldQ.IsBlob
+        BlobLength = 0
+        RecordValue = SELF.GetBlobPreviewByNumber(I,255,BlobLength)
+        IF SELF.GetErrorCode() <> 0
+          RecordValue = 'ERROR: ' & SELF.GetError()
+          DbgRecord:Value = SELF.DebugClarionPreview(RecordValue)
+        ELSE
+          DbgRecord:Value = SELF.DebugClarionPreview(RecordValue,BlobLength)
+        END
+      ELSE
+        RecordValue = SELF.GetFieldByNumber(I,J)
+        DbgRecord:Value = SELF.DebugClarionPreview(RecordValue)
+      END
+      ADD(RecordViewQ)
+    END
   END
 
 LoadStaticViews     ROUTINE
@@ -516,6 +623,110 @@ LoadFields          ROUTINE
     DbgField:SourceIndex = I
     ADD(FieldViewQ)
   END
+
+TestTpsParserType.DebugFieldType PROCEDURE(LONG pFieldNo)
+TypeName                               STRING(32)
+FieldSize                              LONG
+FieldDecimals                          LONG
+FieldDigits                            LONG
+  CODE
+  TypeName = SELF.GetFieldTypeByNumber(pFieldNo)
+  CASE UPPER(CLIP(TypeName))
+    OF 'STRING' OROF 'CSTRING' OROF 'PSTRING'
+      FieldSize = SELF.GetFieldSizeByNumber(pFieldNo)
+      IF FieldSize > 0
+        TypeName = CLIP(TypeName) & '(' & FieldSize & ')'
+      END
+    OF 'DECIMAL'
+      FieldSize = SELF.GetFieldSizeByNumber(pFieldNo)
+      FieldDecimals = SELF.GetFieldDecimalsByNumber(pFieldNo)
+      FieldDigits = (FieldSize * 2) - 2
+      IF FieldDigits > 0
+        TypeName = CLIP(TypeName) & '(' & FieldDigits & ',' & FieldDecimals & ')'
+      END
+  END
+  RETURN TypeName
+
+TestTpsParserType.DebugClarionPreview PROCEDURE(STRING pValue,LONG pTotalLength)
+Preview                                    STRING(255)
+HexDigits                                  STRING('0123456789ABCDEF')
+Token                                      STRING(4)
+ValueLength                                LONG
+Position                                   LONG
+OutputLength                               LONG
+TokenLength                                LONG
+PartLength                                 LONG
+Value                                      LONG
+HighNibble                                 LONG
+LowNibble                                  LONG
+InEscape                                   BYTE
+HasMore                                    BYTE
+Truncated                                  BYTE
+  CODE
+  ValueLength = LEN(pValue)
+  IF pTotalLength < ValueLength
+    pTotalLength = ValueLength
+  END
+  LOOP Position = 1 TO ValueLength
+    Value = VAL(pValue[Position])
+    HasMore = CHOOSE(Position < ValueLength OR pTotalLength > ValueLength,1,0)
+    IF Value >= 32 AND Value <= 126
+      PartLength = 1 + InEscape
+      IF OutputLength + PartLength + CHOOSE(HasMore,3,0) > SIZE(Preview)
+        Truncated = TRUE
+        BREAK
+      END
+      IF InEscape
+        OutputLength += 1
+        Preview[OutputLength] = '>'
+        InEscape = FALSE
+      END
+      OutputLength += 1
+      Preview[OutputLength] = CHR(Value)
+    ELSE
+      CLEAR(Token)
+      HighNibble = BSHIFT(Value,-4)
+      LowNibble = BAND(Value,0FH)
+      IF HighNibble >= 10
+        Token[1] = '0'
+        Token[2] = HexDigits[HighNibble + 1]
+        Token[3] = HexDigits[LowNibble + 1]
+        Token[4] = 'h'
+        TokenLength = 4
+      ELSE
+        Token[1] = HexDigits[HighNibble + 1]
+        Token[2] = HexDigits[LowNibble + 1]
+        Token[3] = 'h'
+        TokenLength = 3
+      END
+      PartLength = TokenLength + CHOOSE(InEscape,1,1)
+      IF OutputLength + PartLength + 1 + CHOOSE(HasMore,3,0) > SIZE(Preview)
+        Truncated = TRUE
+        BREAK
+      END
+      IF ~InEscape
+        OutputLength += 1
+        Preview[OutputLength] = '<'
+        InEscape = TRUE
+      ELSE
+        OutputLength += 1
+        Preview[OutputLength] = ','
+      END
+      Preview[OutputLength + 1 : OutputLength + TokenLength] = Token[1 : TokenLength]
+      OutputLength += TokenLength
+    END
+  END
+  IF InEscape
+    OutputLength += 1
+    Preview[OutputLength] = '>'
+  END
+  IF Truncated OR pTotalLength > ValueLength
+    IF OutputLength > SIZE(Preview) - 3
+      OutputLength = SIZE(Preview) - 3
+    END
+    Preview[OutputLength + 1 : OutputLength + 3] = '...'
+  END
+  RETURN Preview
 
 TestTpsParserType.DebugStringWindow PROCEDURE(*STRING pValue,LONG pStart,LONG pLength,STRING pCaption)
 DisplayValue                          &STRING

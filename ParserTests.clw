@@ -12,7 +12,11 @@ ExitProcess      PROCEDURE(ULONG pCode),PASCAL,RAW,NAME('ExitProcess'),DLL(1)
   END
   END
 
-Parser           TpsParserType
+RegressionTpsParserType CLASS(TpsParserType),TYPE
+BlobPreviewByNumber PROCEDURE(LONG pFieldNo,LONG pMaxBytes,*LONG pBlobLength),STRING
+                      END
+
+Parser           RegressionTpsParserType
 Result           LONG
 I                LONG
 ExpectedTime     LONG
@@ -21,6 +25,8 @@ GroupString      STRING(10)
 ExpectedGroup    STRING(10)
 MemoText         STRING(12000)
 LargeRaw         STRING(40000)
+BlobPreview      STRING(16)
+BlobLength       LONG
 TempBlobName     STRING(260)
 
 BlobFile         FILE,DRIVER('TOPSPEED'),NAME(TempBlobName),PRE(BTF),CREATE
@@ -70,6 +76,11 @@ Id                   LONG
   MemoText = Parser.GetMemoField('LARGEMEMO')
   RequireLong(VAL(MemoText[1]),66,80)
   RequireLong(VAL(MemoText[12000]),79,81)
+
+  BlobPreview = Parser.BlobPreviewByNumber(Parser.GetFieldNumber('LARGEBLOB'),SIZE(BlobPreview),BlobLength)
+  RequireLong(BlobLength,40000,82)
+  RequireLong(VAL(BlobPreview[1]),1,83)
+  RequireLong(VAL(BlobPreview[16]),16,84)
 
   TempBlobName = 'tests\ParserTestsBlob.tmp'
   REMOVE(BlobFile)
@@ -255,6 +266,10 @@ Id                   LONG
   END
 
   ExitProcess(0)
+
+RegressionTpsParserType.BlobPreviewByNumber PROCEDURE(LONG pFieldNo,LONG pMaxBytes,*LONG pBlobLength)
+  CODE
+  RETURN SELF.GetBlobPreviewByNumber(pFieldNo,pMaxBytes,pBlobLength)
 
 RequireLong PROCEDURE(LONG pActual,LONG pExpected,LONG pCode)
   CODE

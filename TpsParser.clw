@@ -142,6 +142,9 @@ TpsParserType.Kill  PROCEDURE
   IF ~SELF.ReturnBuffer &= NULL
     DISPOSE(SELF.ReturnBuffer)
   END
+  IF ~SELF.BlobPreviewBuffer &= NULL
+    DISPOSE(SELF.BlobPreviewBuffer)
+  END
   IF ~SELF.LastErrorText &= NULL
     DISPOSE(SELF.LastErrorText)
   END
@@ -718,22 +721,53 @@ TpsParserType.GetBlobField  PROCEDURE(STRING pFieldName,*BLOB pBlob)
   RETURN SELF.GetBlobFieldByNumber(SELF.GetFieldNumber(pFieldName),pBlob)
 
 TpsParserType.GetBlobFieldByNumber  PROCEDURE(LONG pFieldNo,*BLOB pBlob)
+BlobLen                               LONG
+Result                                LONG
+  CODE
+  Result = SELF.LoadBlobPreviewByNumber(pFieldNo,7FFFFFFFH,BlobLen)
+  IF Result <> 0
+    pBlob{PROP:Size} = 0
+    pBlob{PROP:Touched} = TRUE
+    RETURN Result
+  END
+  pBlob{PROP:Size} = BlobLen
+  IF BlobLen > 0 AND NOT (SELF.BlobPreviewBuffer &= NULL)
+    pBlob[0 : BlobLen - 1] = SELF.BlobPreviewBuffer[1 : BlobLen]
+  END
+  IF ~SELF.BlobPreviewBuffer &= NULL
+    DISPOSE(SELF.BlobPreviewBuffer)
+  END
+  pBlob{PROP:Touched} = TRUE
+  RETURN SELF.SetLastError(0,'')
+
+TpsParserType.GetBlobPreviewByNumber PROCEDURE(LONG pFieldNo,LONG pMaxBytes,*LONG pBlobLength)
+Result                                  LONG
+  CODE
+  Result = SELF.LoadBlobPreviewByNumber(pFieldNo,pMaxBytes,pBlobLength)
+  IF Result <> 0 OR SELF.BlobPreviewBuffer &= NULL
+    RETURN ''
+  END
+  RETURN SELF.BlobPreviewBuffer
+
+TpsParserType.LoadBlobPreviewByNumber PROCEDURE(LONG pFieldNo,LONG pMaxBytes,*LONG pBlobLength)
 Owner                                 LONG
 MemoIndex                             LONG
 RawLen                                LONG
 BlobLen                               LONG
 Avail                                 LONG
+PreviewLen                            LONG
+CopyLen                               LONG
 Raw                                   &STRING
   CODE
+  pBlobLength = 0
+  IF ~SELF.BlobPreviewBuffer &= NULL
+    DISPOSE(SELF.BlobPreviewBuffer)
+  END
   IF SELF.CurrentRecord < 1 OR SELF.CurrentRecord > RECORDS(SELF.DataQ) OR pFieldNo < 1 OR pFieldNo > RECORDS(SELF.FieldQ)
-    pBlob{PROP:Size} = 0
-    pBlob{PROP:Touched} = TRUE
     RETURN SELF.SetLastError(TpsErrBlobContext,'Invalid blob read context; current record=' & SELF.CurrentRecord & ' record queue count=' & RECORDS(SELF.DataQ) & ' field number=' & pFieldNo & ' field count=' & RECORDS(SELF.FieldQ))
   END
   GET(SELF.FieldQ,pFieldNo)
   IF ~SELF.FieldQ.IsBlob
-    pBlob{PROP:Size} = 0
-    pBlob{PROP:Touched} = TRUE
     RETURN SELF.SetLastError(TpsErrBlobFieldType,'Field is not a BLOB; field number=' & pFieldNo & ' name=' & CLIP(SELF.FieldQ.ShortName) & ' type=' & CLIP(SELF.FieldQ.TypeName))
   END
   MemoIndex = SELF.FieldQ.MemoIndex
@@ -743,55 +777,64 @@ Raw                                   &STRING
     RawLen = 0
   END
   IF RawLen = 0
-    pBlob{PROP:Size} = 0
-    pBlob{PROP:Touched} = TRUE
     RETURN SELF.SetLastError(0,'')
   END
-  Raw &= NEW(STRING(RawLen))
-  RawLen = SELF.CopyMemoRaw(Owner,MemoIndex,Raw,RawLen)
-  IF SELF.FieldQ.IsBlob
-    IF RawLen < TpsBlobLenPrefix
-      pBlob{PROP:Size} = 0
-      pBlob{PROP:Touched} = TRUE
+  IF RawLen < TpsBlobLenPrefix
+    IF SELF.IgnoreErrors
+      RETURN SELF.SetLastError(0,'')
+    END
+    RETURN SELF.SetLastError(TpsErrBlobData,'TPS BLOB is missing its four-byte length header')
+  END
+  IF pMaxBytes < 0
+    pMaxBytes = 0
+  END
+  CopyLen = RawLen
+  IF pMaxBytes < RawLen - TpsBlobLenPrefix
+    CopyLen = pMaxBytes + TpsBlobLenPrefix
+  END
+  Raw &= NEW(STRING(CopyLen))
+  IF Raw &= NULL
+    RETURN SELF.SetLastError(TpsErrBlobData,'Could not allocate TPS BLOB preview buffer; byte count=' & CopyLen)
+  END
+  CopyLen = SELF.CopyMemoRaw(Owner,MemoIndex,Raw,CopyLen)
+  IF CopyLen < TpsBlobLenPrefix
+    DISPOSE(Raw)
+    IF SELF.IgnoreErrors
+      RETURN SELF.SetLastError(0,'')
+    END
+    RETURN SELF.SetLastError(TpsErrBlobData,'TPS BLOB is missing its four-byte length header')
+  END
+  BlobLen = SELF.ReadLeLong(Raw,0)
+  Avail = RawLen - TpsBlobLenPrefix
+  IF BlobLen > Avail
+    IF SELF.IgnoreErrors
+      BlobLen = Avail
+    ELSE
       DISPOSE(Raw)
-      IF SELF.IgnoreErrors
-        RETURN SELF.SetLastError(0,'')
-      END
-      RETURN SELF.SetLastError(TpsErrBlobData,'TPS BLOB is missing its four-byte length header')
-    END
-    BlobLen = SELF.ReadLeLong(Raw,0)
-    Avail = RawLen - TpsBlobLenPrefix
-    IF BlobLen > Avail
-      IF SELF.IgnoreErrors
-        BlobLen = Avail
-      ELSE
-        DISPOSE(Raw)
-        pBlob{PROP:Size} = 0
-        pBlob{PROP:Touched} = TRUE
-        RETURN SELF.SetLastError(TpsErrBlobData,'TPS BLOB declares ' & BlobLen & ' bytes but only ' & Avail & ' are available')
-      END
-    END
-    IF BlobLen < 0
-      IF SELF.IgnoreErrors
-        BlobLen = Avail
-      ELSE
-        DISPOSE(Raw)
-        pBlob{PROP:Size} = 0
-        pBlob{PROP:Touched} = TRUE
-        RETURN SELF.SetLastError(TpsErrBlobData,'TPS BLOB declares negative length ' & BlobLen)
-      END
-    END
-    pBlob{PROP:Size} = BlobLen
-    IF BlobLen > 0
-      pBlob[0 : BlobLen - 1] = Raw[TpsBlobLenPrefix + 1 : TpsBlobLenPrefix + BlobLen]
-    END
-  ELSE
-    pBlob{PROP:Size} = RawLen
-    IF RawLen > 0
-      pBlob[0 : RawLen - 1] = Raw[1 : RawLen]
+      RETURN SELF.SetLastError(TpsErrBlobData,'TPS BLOB declares ' & BlobLen & ' bytes but only ' & Avail & ' are available')
     END
   END
-  pBlob{PROP:Touched} = TRUE
+  IF BlobLen < 0
+    IF SELF.IgnoreErrors
+      BlobLen = Avail
+    ELSE
+      DISPOSE(Raw)
+      RETURN SELF.SetLastError(TpsErrBlobData,'TPS BLOB declares negative length ' & BlobLen)
+    END
+  END
+  pBlobLength = BlobLen
+  PreviewLen = BlobLen
+  IF PreviewLen > pMaxBytes
+    PreviewLen = pMaxBytes
+  END
+  IF PreviewLen > 0
+    SELF.BlobPreviewBuffer &= NEW(STRING(PreviewLen))
+    IF SELF.BlobPreviewBuffer &= NULL
+      DISPOSE(Raw)
+      RETURN SELF.SetLastError(TpsErrBlobData,'Could not allocate TPS BLOB preview result; byte count=' & PreviewLen)
+    END
+    SELF.BlobPreviewBuffer = Raw[TpsBlobLenPrefix + 1 : TpsBlobLenPrefix + PreviewLen]
+  END
   DISPOSE(Raw)
   RETURN SELF.SetLastError(0,'')
 
@@ -800,6 +843,7 @@ TpsParserType.Construct PROCEDURE
   SELF.Src &= NULL
   SELF.WorkPage &= NULL
   SELF.ReturnBuffer &= NULL
+  SELF.BlobPreviewBuffer &= NULL
   SELF.LastErrorText &= NULL
   SELF.DataQ &= NEW(TpsDataQueue)
   SELF.MemoQ &= NEW(TpsMemoQueue)

@@ -2,7 +2,7 @@
 
 `TpsParserType` is a reusable Clarion class for reading records, fields, memos, and blobs from TPS files. Parsing is strict by default. Explicit recovery entry points can skip malformed pages and use bounded BLOB fallbacks.
 
-![TPS parser test output](tpsparser-test.png)
+![TPS parser test output](images/tpsparser-test.png)
 
 ## Attribution and license
 
@@ -31,6 +31,14 @@ Include the class in your source:
 ```clarion
   INCLUDE('TpsParser.inc'),ONCE
 ```
+
+## Debug inspector
+
+The `Test` project includes a Debug button that opens a resizable inspector for parsed TPS state. Its Records tab selects a table and record, then lists each field's name, Clarion type, and value; arrays use one row per element, while binary and BLOB previews use Clarion-style hexadecimal escapes. Additional tabs expose the parser's internal queues and loaded source bytes.
+
+![TPS parser debug Records tab](images/tpsparser-debug-records.png)
+
+The debug window code and original idea were contributed by [CarlTBarnes](https://github.com/CarlTBarnes) in [PR #1](https://github.com/CarlosGtrz/tpsparser/pull/1). The current inspector builds on that contribution.
 
 ## Basic usage
 

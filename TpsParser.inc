@@ -143,6 +143,7 @@ GetBlobFieldByNumber  PROCEDURE(LONG pFieldNo,*BLOB pBlob),LONG,PROC
 ! Protected diagnostic state
 Src                   &STRING,PROTECTED
 SrcLen                LONG,PROTECTED
+GetBlobPreviewByNumber PROCEDURE(LONG pFieldNo,LONG pMaxBytes,*LONG pBlobLength),STRING,PROTECTED
 
 ! Internal members
 WorkPage              &STRING,PRIVATE
@@ -152,6 +153,7 @@ CurrentTable          LONG,PROTECTED
 LastError             LONG,PRIVATE
 LastErrorText         &STRING,PRIVATE
 ReturnBuffer          &STRING,PRIVATE
+BlobPreviewBuffer     &STRING,PRIVATE
 IgnoreErrors          BYTE,PRIVATE
 ParsePass             BYTE,PRIVATE
 Arrival               LONG,PRIVATE
@@ -192,6 +194,7 @@ FindFirstMemoChunk    PROCEDURE(LONG pOwner,LONG pMemoIndex),LONG,PRIVATE
 MemoRawLength         PROCEDURE(LONG pOwner,LONG pMemoIndex),LONG,PRIVATE
 CopyMemoRaw           PROCEDURE(LONG pOwner,LONG pMemoIndex,*STRING pRaw,LONG pMaxLen),LONG,PRIVATE
 MemoIsComplete        PROCEDURE(LONG pOwner,LONG pMemoIndex,*LONG pRawLen),BYTE,PRIVATE
+LoadBlobPreviewByNumber PROCEDURE(LONG pFieldNo,LONG pMaxBytes,*LONG pBlobLength),LONG,PRIVATE
 RollbackData          PROCEDURE(LONG pKeep),PRIVATE
 RollbackMemos         PROCEDURE(LONG pKeep),PRIVATE
 RollbackTableDefs     PROCEDURE(LONG pKeep),PRIVATE
