@@ -18,15 +18,13 @@
 
 !Type declarations
 
-TpsPayloadMax       EQUATE(32768)
-TpsNameMax          EQUATE(128)
 TpsTypeNameMax      EQUATE(32)
 
 TpsDataQueue        QUEUE,TYPE
 TableNo               LONG
 RecordNumber          LONG
 PayloadLen            LONG
-Payload               STRING(TpsPayloadMax)
+Payload               &STRING
                     END
 
 TpsMemoQueue        QUEUE,TYPE
@@ -35,25 +33,29 @@ Owner                 LONG
 MemoIndex             LONG
 Sequence              LONG
 DataLen               LONG
-Payload               STRING(TpsPayloadMax)
+Payload               &STRING
+Arrival               LONG
                     END
 
 TpsTableDefQueue    QUEUE,TYPE
 TableNo               LONG
 BlockNo               LONG
 DataLen               LONG
-Payload               STRING(TpsPayloadMax)
+Payload               &STRING
+Arrival               LONG
                     END
 
 TpsTableNameQueue   QUEUE,TYPE
 TableNo               LONG
-Name                  STRING(TpsNameMax)
+Name                  &STRING
+Arrival               LONG
                     END
 
 TpsFieldQueue       QUEUE,TYPE
 TableNo               LONG
-Name                  STRING(TpsNameMax)
-ShortName             STRING(TpsNameMax)
+FieldNo               LONG
+Name                  &STRING
+ShortName             &STRING
 FieldType             LONG
 TypeName              STRING(TpsTypeNameMax)
 Offset                LONG
@@ -71,6 +73,9 @@ TpsParserType       CLASS,TYPE,MODULE('TpsParser'),LINK('TpsParser'),TYPE
 ! Initialization and cleanup
 Init                  PROCEDURE(STRING pFileName),LONG
 Init                  PROCEDURE(STRING pFileName,STRING pOwner),LONG
+Init                  PROCEDURE(STRING pFileName,STRING pOwner,BYTE pIgnoreErrors),LONG
+InitRecovering        PROCEDURE(STRING pFileName),LONG
+InitRecovering        PROCEDURE(STRING pFileName,STRING pOwner),LONG
 Kill                  PROCEDURE
 
 ! Error information
@@ -143,7 +148,11 @@ WorkPageLen           LONG,PRIVATE
 CurrentRecord         LONG,PRIVATE
 CurrentTable          LONG,PRIVATE
 LastError             LONG,PRIVATE
-LastErrorText         STRING(512),PRIVATE
+LastErrorText         &STRING,PRIVATE
+ReturnBuffer          &STRING,PRIVATE
+IgnoreErrors          BYTE,PRIVATE
+ParsePass             BYTE,PRIVATE
+Arrival               LONG,PRIVATE
 DataQ                 &TpsDataQueue,PRIVATE
 MemoQ                 &TpsMemoQueue,PRIVATE
 TableDefQ             &TpsTableDefQueue,PRIVATE
@@ -151,6 +160,8 @@ TableNameQ            &TpsTableNameQueue,PRIVATE
 FieldQ                &TpsFieldQueue,PRIVATE
 Construct             PROCEDURE,PRIVATE
 Destruct              PROCEDURE,PRIVATE
+InitCore              PROCEDURE(STRING pFileName,STRING pOwner,BYTE pHasOwner,BYTE pIgnoreErrors),LONG,PRIVATE
+ValidateHeader        PROCEDURE,LONG,PRIVATE
 ResolveTableNumber    PROCEDURE(LONG pTableIndex),LONG,PRIVATE
 GetTableNameByTableNumber PROCEDURE(LONG pTableNo),STRING,PRIVATE
 LoadSource            PROCEDURE(STRING pFileName),LONG,PRIVATE
@@ -160,21 +171,36 @@ ShuffleKey            PROCEDURE(*STRING pKey),PRIVATE
 DecryptRange          PROCEDURE(LONG pOffset,LONG pLength,*STRING pKey),LONG,PRIVATE
 DecryptBlock64        PROCEDURE(LONG pOffset,*STRING pKey),PRIVATE
 ParseTps              PROCEDURE,LONG,PRIVATE
-ParseBlock            PROCEDURE(LONG pStart,LONG pEnd),PRIVATE
-IsCompletePage        PROCEDURE(LONG pPos,LONG pPageSize),BYTE,PRIVATE
-ParsePage             PROCEDURE(LONG pPos),LONG,PRIVATE
+ParseAllBlocks        PROCEDURE,LONG,PRIVATE
+ParseBlock            PROCEDURE(LONG pStart,LONG pEnd),LONG,PRIVATE
+IsCompletePage        PROCEDURE(LONG pPos,LONG pPageSize,LONG pEnd),BYTE,PRIVATE
+ParsePage             PROCEDURE(LONG pPos,LONG pEnd),LONG,PRIVATE
 BuildWorkPage         PROCEDURE(LONG pCompressedStart,LONG pCompressedLen,LONG pPageSize,LONG pPageSizeUncompressed,LONG pFlags),LONG,PRIVATE
 DecodeRleCount        PROCEDURE(LONG pCompressedStart,LONG pCompressedLen,*LONG pCompressedPos,*LONG pCount),LONG,PRIVATE
 ParseRecords          PROCEDURE(*STRING pData,LONG pLen,LONG pRecordCount),LONG,PRIVATE
-ProcessRecord         PROCEDURE(*STRING pRecord,LONG pRecordLen,LONG pHeaderLen),PRIVATE
+ProcessRecord         PROCEDURE(*STRING pRecord,LONG pRecordLen,LONG pHeaderLen),LONG,PRIVATE
 ParseTableLayout      PROCEDURE,LONG,PRIVATE
-ReadZeroString        PROCEDURE(*STRING pData,LONG pLen,*LONG pPos),STRING,PRIVATE
+TableDefinitionIsComplete PROCEDURE(LONG pTableNo,*LONG pTotalLen),BYTE,PRIVATE
+ValidateRecordPayload PROCEDURE(LONG pTableNo,*STRING pData,LONG pLen),LONG,PRIVATE
+ReadZeroString        PROCEDURE(*STRING pData,LONG pLen,*LONG pPos),LONG,PRIVATE
 StripTablePrefix      PROCEDURE(STRING pName),STRING,PRIVATE
 ResolveFieldValue     PROCEDURE(LONG pFieldNo,LONG pDimension,*LONG pOffset,*LONG pLength),BYTE,PRIVATE
 CompareMemoKey        PROCEDURE(LONG pIndex,LONG pOwner,LONG pMemoIndex),LONG,PRIVATE
 FindFirstMemoChunk    PROCEDURE(LONG pOwner,LONG pMemoIndex),LONG,PRIVATE
 MemoRawLength         PROCEDURE(LONG pOwner,LONG pMemoIndex),LONG,PRIVATE
 CopyMemoRaw           PROCEDURE(LONG pOwner,LONG pMemoIndex,*STRING pRaw,LONG pMaxLen),LONG,PRIVATE
+MemoIsComplete        PROCEDURE(LONG pOwner,LONG pMemoIndex,*LONG pRawLen),BYTE,PRIVATE
+RollbackData          PROCEDURE(LONG pKeep),PRIVATE
+RollbackMemos         PROCEDURE(LONG pKeep),PRIVATE
+RollbackTableDefs     PROCEDURE(LONG pKeep),PRIVATE
+RollbackTableNames    PROCEDURE(LONG pKeep),PRIVATE
+FreeData              PROCEDURE,PRIVATE
+FreeMemos             PROCEDURE,PRIVATE
+FreeTableDefs         PROCEDURE,PRIVATE
+FreeTableNames        PROCEDURE,PRIVATE
+FreeFields            PROCEDURE,PRIVATE
+SetReturnBuffer       PROCEDURE(*STRING pData,LONG pPos,LONG pLen),STRING,PRIVATE
+TrimFixedString       PROCEDURE(*STRING pData,LONG pPos,LONG pLen),STRING,PRIVATE
 SetLastError          PROCEDURE(LONG pError,STRING pText),LONG,PRIVATE
 ReadByte              PROCEDURE(*STRING pData,LONG pPos),LONG,PRIVATE
 ReadLeShort           PROCEDURE(*STRING pData,LONG pPos),LONG,PRIVATE
@@ -196,6 +222,10 @@ TpsErrHeaderTooShort    EQUATE(1101)
 TpsErrHeaderMarker  EQUATE(1102)
 TpsErrHeaderSize    EQUATE(1103)
 TpsErrHeaderSignature   EQUATE(1104)
+TpsErrBlockRange    EQUATE(1105)
+TpsErrPageInvalid   EQUATE(1106)
+TpsErrRleInvalid    EQUATE(1107)
+TpsErrRecordPageInvalid EQUATE(1108)
 TpsErrDecryptTooShort   EQUATE(1201)
 TpsErrDecryptHeaderRange    EQUATE(1202)
 TpsErrDecryptHeaderMarker   EQUATE(1203)
@@ -214,8 +244,12 @@ TpsErrStringExternalName    EQUATE(1407)
 TpsErrMemoExternalName  EQUATE(1408)
 TpsErrMemoDef       EQUATE(1409)
 TpsErrFieldDefMissing   EQUATE(1410)
+TpsErrFieldDataInvalid  EQUATE(1411)
+TpsErrFieldTypeUnsupported EQUATE(1412)
+TpsErrFieldAmbiguous    EQUATE(1413)
 TpsErrRecordIndex   EQUATE(1501)
 TpsErrRecordNotFound    EQUATE(1502)
 TpsErrBlobContext   EQUATE(1601)
 TpsErrBlobFieldType EQUATE(1602)
+TpsErrBlobData      EQUATE(1603)
 

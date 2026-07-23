@@ -4,6 +4,10 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 # Clarion 2.1.0.2447
 Project("{12B76EC0-1D7B-4FA7-A7D0-C524288B48A1}") = "Test", "Test.cwproj", "{984219FD-0E58-4449-A68B-3661AB7D2CF1}"
 EndProject
+Project("{12B76EC0-1D7B-4FA7-A7D0-C524288B48A1}") = "ParserTests", "ParserTests.cwproj", "{EE43276D-0B32-42FB-B589-A13305DBA3D4}"
+EndProject
+Project("{12B76EC0-1D7B-4FA7-A7D0-C524288B48A1}") = "GenerateFixtures", "GenerateFixtures.cwproj", "{61E50A65-F512-4D8E-933B-5F22FCF901F1}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -14,5 +18,13 @@ Global
 		{984219FD-0E58-4449-A68B-3661AB7D2CF1}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{984219FD-0E58-4449-A68B-3661AB7D2CF1}.Release|Any CPU.Build.0 = Release|Any CPU
 		{984219FD-0E58-4449-A68B-3661AB7D2CF1}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{EE43276D-0B32-42FB-B589-A13305DBA3D4}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{EE43276D-0B32-42FB-B589-A13305DBA3D4}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{EE43276D-0B32-42FB-B589-A13305DBA3D4}.Release|Any CPU.Build.0 = Release|Any CPU
+		{EE43276D-0B32-42FB-B589-A13305DBA3D4}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{61E50A65-F512-4D8E-933B-5F22FCF901F1}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{61E50A65-F512-4D8E-933B-5F22FCF901F1}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{61E50A65-F512-4D8E-933B-5F22FCF901F1}.Release|Any CPU.Build.0 = Release|Any CPU
+		{61E50A65-F512-4D8E-933B-5F22FCF901F1}.Release|Any CPU.ActiveCfg = Release|Any CPU
 	EndGlobalSection
 EndGlobal
