@@ -140,24 +140,26 @@ GetMemoFieldByNumber  PROCEDURE(LONG pFieldNo),STRING
 GetBlobField          PROCEDURE(STRING pFieldName,*BLOB pBlob),LONG,PROC
 GetBlobFieldByNumber  PROCEDURE(LONG pFieldNo,*BLOB pBlob),LONG,PROC
 
-! Private members
-Src                   &STRING,PRIVATE
-SrcLen                LONG,PRIVATE
+! Protected diagnostic state
+Src                   &STRING,PROTECTED
+SrcLen                LONG,PROTECTED
+
+! Internal members
 WorkPage              &STRING,PRIVATE
 WorkPageLen           LONG,PRIVATE
 CurrentRecord         LONG,PRIVATE
-CurrentTable          LONG,PRIVATE
+CurrentTable          LONG,PROTECTED
 LastError             LONG,PRIVATE
 LastErrorText         &STRING,PRIVATE
 ReturnBuffer          &STRING,PRIVATE
 IgnoreErrors          BYTE,PRIVATE
 ParsePass             BYTE,PRIVATE
 Arrival               LONG,PRIVATE
-DataQ                 &TpsDataQueue,PRIVATE
-MemoQ                 &TpsMemoQueue,PRIVATE
-TableDefQ             &TpsTableDefQueue,PRIVATE
-TableNameQ            &TpsTableNameQueue,PRIVATE
-FieldQ                &TpsFieldQueue,PRIVATE
+DataQ                 &TpsDataQueue,PROTECTED
+MemoQ                 &TpsMemoQueue,PROTECTED
+TableDefQ             &TpsTableDefQueue,PROTECTED
+TableNameQ            &TpsTableNameQueue,PROTECTED
+FieldQ                &TpsFieldQueue,PROTECTED
 Construct             PROCEDURE,PRIVATE
 Destruct              PROCEDURE,PRIVATE
 InitCore              PROCEDURE(STRING pFileName,STRING pOwner,BYTE pHasOwner,BYTE pIgnoreErrors),LONG,PRIVATE
