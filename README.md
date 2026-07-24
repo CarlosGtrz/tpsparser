@@ -165,6 +165,12 @@ LOOP T# = 1 TO TableCount
 END
 ```
 
+`GetTableName` prefers a meaningful name stored in the TPS metadata. For an
+unnamed single-table file, it returns the source filename without its path or
+final extension (for example, `CUSTOMER.TPS` returns `CUSTOMER`). Unnamed
+tables in a superfile continue to use their field prefix, then their numeric
+table number as a final fallback.
+
 ## Useful metadata methods
 
 ```clarion

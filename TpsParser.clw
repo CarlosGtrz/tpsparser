@@ -99,6 +99,7 @@ Result                LONG
   SELF.Kill()
   SELF.LastError = 0
   SELF.IgnoreErrors = pIgnoreErrors
+  SELF.SourceFileName = pFileName
   Result = SELF.LoadSource(pFileName)
   IF Result <> 0
     RETURN Result
@@ -152,6 +153,7 @@ TpsParserType.Kill  PROCEDURE
   SELF.WorkPageLen = 0
   SELF.CurrentRecord = 0
   SELF.CurrentTable = 0
+  CLEAR(SELF.SourceFileName)
   SELF.IgnoreErrors = FALSE
   SELF.ParsePass = 0
   SELF.Arrival = 0
@@ -845,6 +847,7 @@ TpsParserType.Construct PROCEDURE
   SELF.ReturnBuffer &= NULL
   SELF.BlobPreviewBuffer &= NULL
   SELF.LastErrorText &= NULL
+  CLEAR(SELF.SourceFileName)
   SELF.DataQ &= NEW(TpsDataQueue)
   SELF.MemoQ &= NEW(TpsMemoQueue)
   SELF.TableDefQ &= NEW(TpsTableDefQueue)
@@ -1003,6 +1006,7 @@ SavedTable                                LONG
 Result                                    LONG
 ResultName                                &STRING
 NumberText                                STRING(20)
+FileTableName                             STRING(TpsFileNameMax)
   CODE
   ResultName &= NULL
   IF pTableNo = 0
@@ -1034,6 +1038,12 @@ NumberText                                STRING(20)
     DISPOSE(ResultName)
     RETURN SELF.ReturnBuffer
   END
+  IF SELF.Tables() = 1
+    FileTableName = SELF.GetSourceTableName()
+    IF CLIP(FileTableName) <> ''
+      RETURN CLIP(FileTableName)
+    END
+  END
   SavedTable = SELF.CurrentTable
   SELF.CurrentTable = pTableNo
   IF SELF.ParseTableLayout() = 0
@@ -1062,6 +1072,38 @@ NumberText                                STRING(20)
   END
   NumberText = pTableNo
   RETURN CLIP(NumberText)
+
+TpsParserType.GetSourceTableName PROCEDURE
+SourceName                         STRING(TpsFileNameMax)
+NameLen                            LONG
+PathPos                            LONG
+SlashPos                           LONG
+DotPos                             LONG
+  CODE
+  SourceName = CLIP(SELF.SourceFileName)
+  NameLen = LEN(CLIP(SourceName))
+  IF NameLen = 0
+    RETURN ''
+  END
+  PathPos = INSTRING('\',SourceName,-1,NameLen)
+  SlashPos = INSTRING('/',SourceName,-1,NameLen)
+  IF SlashPos > PathPos
+    PathPos = SlashPos
+  END
+  IF PathPos > 0
+    SourceName = SourceName[PathPos + 1 : NameLen]
+  END
+  NameLen = LEN(CLIP(SourceName))
+  IF NameLen = 0
+    RETURN ''
+  END
+  DotPos = INSTRING('.',SourceName,-1,NameLen)
+  IF DotPos > 1
+    RETURN SourceName[1 : DotPos - 1]
+  ELSIF DotPos = 1
+    RETURN ''
+  END
+  RETURN CLIP(SourceName)
 
 TpsParserType.LoadSource    PROCEDURE(STRING pFileName)
 RawName                       STRING(TpsFileNameMax)

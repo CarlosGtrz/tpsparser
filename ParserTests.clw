@@ -40,7 +40,7 @@ Id                   LONG
   Result = Parser.Init('tests\fixtures\COMPREHENSIVE.TPS')
   RequireLong(Result,0,10)
   RequireLong(Parser.Tables(),1,11)
-  RequireString(UPPER(CLIP(Parser.GetTableName(1))),'SMP',12)
+  RequireString(CLIP(Parser.GetTableName(1)),'COMPREHENSIVE',12)
   RequireLong(Parser.SetTable(1),0,13)
   RequireLong(Parser.Records(),2,14)
   RequirePositive(Parser.Fields(),14,15)
@@ -120,7 +120,7 @@ Id                   LONG
 
   Result = Parser.Init('tests\fixtures\UNNAMED.TPS')
   RequireLong(Result,0,125)
-  RequireString(CLIP(Parser.GetTableName(1)),'1',126)
+  RequireString(CLIP(Parser.GetTableName(1)),'UNNAMED',126)
   RequireLong(Parser.Records(),1,127)
   Parser.Kill()
 
@@ -142,12 +142,14 @@ Id                   LONG
   Result = Parser.Init('CUSTOMER.TPS')
   RequireLong(Result,0,130)
   RequirePositive(Parser.Tables(),1,131)
+  RequireString(CLIP(Parser.GetTableName(1)),'CUSTOMER',310)
   RequirePositive(Parser.Records(),1,132)
   Parser.Kill()
 
   Result = Parser.Init('ORDERS.TPS')
   RequireLong(Result,0,140)
   RequirePositive(Parser.Tables(),1,141)
+  RequireString(CLIP(Parser.GetTableName(1)),'ORDERS',311)
   RequirePositive(Parser.Records(),1,142)
   Parser.Kill()
 

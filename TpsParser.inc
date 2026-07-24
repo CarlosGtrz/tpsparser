@@ -150,6 +150,7 @@ WorkPage              &STRING,PRIVATE
 WorkPageLen           LONG,PRIVATE
 CurrentRecord         LONG,PRIVATE
 CurrentTable          LONG,PROTECTED
+SourceFileName        STRING(260),PRIVATE
 LastError             LONG,PRIVATE
 LastErrorText         &STRING,PRIVATE
 ReturnBuffer          &STRING,PRIVATE
@@ -168,6 +169,7 @@ InitCore              PROCEDURE(STRING pFileName,STRING pOwner,BYTE pHasOwner,BY
 ValidateHeader        PROCEDURE,LONG,PRIVATE
 ResolveTableNumber    PROCEDURE(LONG pTableIndex),LONG,PRIVATE
 GetTableNameByTableNumber PROCEDURE(LONG pTableNo),STRING,PRIVATE
+GetSourceTableName    PROCEDURE,STRING,PRIVATE
 LoadSource            PROCEDURE(STRING pFileName),LONG,PRIVATE
 DecryptSource         PROCEDURE(STRING pOwner),LONG,PRIVATE
 BuildOwnerKey         PROCEDURE(STRING pOwner,*STRING pKey),PRIVATE
