@@ -3,6 +3,8 @@
   MAP
 GenerateFixture PROCEDURE(STRING pName,STRING pOwner),LONG
 GenerateFallbackFixture PROCEDURE(STRING pName),LONG
+GenerateBatchFixture PROCEDURE(STRING pName),LONG
+GenerateSuperfileFixture PROCEDURE(STRING pName),LONG
 GenerateLargeRecordFixture PROCEDURE(STRING pName),LONG
 PutLeShort      PROCEDURE(*STRING pData,LONG pOffset,LONG pValue)
 PutLeLong       PROCEDURE(*STRING pData,LONG pOffset,LONG pValue)
@@ -16,6 +18,9 @@ FixtureName     STRING(260)
 FixtureOwner    STRING(100)
 FallbackName    STRING(260)
 LargeRawName    STRING(260)
+BatchName       STRING(260)
+SuperBaseName   STRING(260)
+SuperDetailName STRING(260)
 Result          LONG
 
   CODE
@@ -32,6 +37,14 @@ Result          LONG
     ExitProcess(Result)
   END
   Result = GenerateLargeRecordFixture('tests\fixtures\LARGE_RECORD.TPS')
+  IF Result
+    ExitProcess(Result)
+  END
+  Result = GenerateBatchFixture('tests\fixtures\BATCH10001.TPS')
+  IF Result
+    ExitProcess(Result)
+  END
+  Result = GenerateSuperfileFixture('tests\fixtures\SUPERFILE.TPS')
   IF Result
     ExitProcess(Result)
   END
@@ -125,6 +138,9 @@ FileResult     LONG
     SMP:BigRecord = 'Y'
     SMP:AliasA = 'AAA'
     SMP:AliasB = 'BBB'
+    SMP:LargeMemo = ''
+    SMP:LargeBlob{PROP:Size} = 0
+    SMP:LargeBlob{PROP:Touched} = TRUE
     ADD(SampleFile)
     IF ERRORCODE()
       FileResult = ERRORCODE()
@@ -165,6 +181,101 @@ FallbackResult  LONG
   FallbackResult = ERRORCODE()
   CLOSE(FallbackFile)
   RETURN FallbackResult
+
+GenerateBatchFixture PROCEDURE(STRING pName)
+BatchFile        FILE,DRIVER('TOPSPEED'),NAME(BatchName),PRE(BAT),CREATE
+ById               KEY(BAT:Id),PRIMARY
+Record             RECORD,PRE()
+Id                   LONG
+Value                STRING(16)
+                   END
+                 END
+BatchResult      LONG
+I                LONG
+  CODE
+  BatchName = pName
+  REMOVE(BatchFile)
+  CREATE(BatchFile)
+  IF ERRORCODE()
+    RETURN ERRORCODE()
+  END
+  OPEN(BatchFile)
+  IF ERRORCODE()
+    RETURN ERRORCODE()
+  END
+  STREAM(BatchFile)
+  LOOP I = 1 TO 10001
+    CLEAR(BAT:Record)
+    BAT:Id = I
+    BAT:Value = 'row ' & I
+    ADD(BatchFile)
+    IF ERRORCODE()
+      BatchResult = ERRORCODE()
+      BREAK
+    END
+  END
+  FLUSH(BatchFile)
+  IF ~BatchResult
+    BatchResult = ERRORCODE()
+  END
+  CLOSE(BatchFile)
+  RETURN BatchResult
+
+GenerateSuperfileFixture PROCEDURE(STRING pName)
+SuperBaseFile    FILE,DRIVER('TOPSPEED'),NAME(SuperBaseName),PRE(SBH),CREATE
+ById               KEY(SBH:Id),PRIMARY
+Record             RECORD,PRE()
+Id                   LONG
+Name                 STRING(20)
+                   END
+                 END
+SuperDetailFile  FILE,DRIVER('TOPSPEED'),NAME(SuperDetailName),PRE(SDT),CREATE
+ById               KEY(SDT:Id),PRIMARY
+Record             RECORD,PRE()
+Id                   LONG
+ParentId             LONG
+Text                 STRING(20)
+                   END
+                 END
+SuperResult      LONG
+  CODE
+  SuperBaseName = pName
+  SuperDetailName = CLIP(pName) & '\!DETAIL'
+  REMOVE(SuperDetailFile)
+  REMOVE(SuperBaseFile)
+  CREATE(SuperBaseFile)
+  IF ERRORCODE()
+    RETURN ERRORCODE()
+  END
+  OPEN(SuperBaseFile)
+  IF ERRORCODE()
+    RETURN ERRORCODE()
+  END
+  CLEAR(SBH:Record)
+  SBH:Id = 1
+  SBH:Name = 'base row'
+  ADD(SuperBaseFile)
+  SuperResult = ERRORCODE()
+  CLOSE(SuperBaseFile)
+  IF SuperResult
+    RETURN SuperResult
+  END
+  CREATE(SuperDetailFile)
+  IF ERRORCODE()
+    RETURN ERRORCODE()
+  END
+  OPEN(SuperDetailFile)
+  IF ERRORCODE()
+    RETURN ERRORCODE()
+  END
+  CLEAR(SDT:Record)
+  SDT:Id = 10
+  SDT:ParentId = 1
+  SDT:Text = 'detail row'
+  ADD(SuperDetailFile)
+  SuperResult = ERRORCODE()
+  CLOSE(SuperDetailFile)
+  RETURN SuperResult
 
 GenerateLargeRecordFixture PROCEDURE(STRING pName)
 RawFile         FILE,DRIVER('DOS'),NAME(LargeRawName),PRE(LRG),CREATE

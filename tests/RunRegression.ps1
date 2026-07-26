@@ -7,72 +7,99 @@ param(
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
 $fixture = Join-Path $PSScriptRoot "fixtures\COMPREHENSIVE.TPS"
-$temporaryFiles = @(
-  (Join-Path $PSScriptRoot "CorruptCount.tmp"),
-  (Join-Path $PSScriptRoot "CorruptRle.tmp"),
-  (Join-Path $PSScriptRoot "CorruptPage.tmp"),
-  (Join-Path $PSScriptRoot "CorruptBlob.tmp"),
-  (Join-Path $PSScriptRoot "CorruptBlobNegative.tmp"),
-  (Join-Path $PSScriptRoot "CorruptBlobMissing.tmp")
-)
+$batchFixture = Join-Path $PSScriptRoot "fixtures\BATCH10001.TPS"
+$workRoot = Join-Path ([IO.Path]::GetTempPath()) "tpsparser-regression"
+$work = Join-Path $workRoot ([guid]::NewGuid().ToString("N"))
+$corruptFixtureRoot = Join-Path $work "corrupt-fixtures"
+$exitCode = 0
 
-function Set-UInt16LittleEndian {
-  param([byte[]]$Bytes, [int]$Offset, [int]$Value)
-  $Bytes[$Offset] = [byte]($Value -band 0xff)
-  $Bytes[$Offset + 1] = [byte](($Value -shr 8) -band 0xff)
-}
+function Invoke-TestProcess {
+  param(
+    [Parameter(Mandatory)]
+    [string]$Name,
 
-function Set-Int32LittleEndian {
-  param([byte[]]$Bytes, [int]$Offset, [int]$Value)
-  $encoded = [BitConverter]::GetBytes($Value)
-  [Array]::Copy($encoded, 0, $Bytes, $Offset, 4)
+    [Parameter(Mandatory)]
+    [string]$FilePath,
+
+    [string[]]$Arguments = @()
+  )
+
+  $startParameters = @{
+    FilePath = $FilePath
+    WorkingDirectory = $repo
+    WindowStyle = "Hidden"
+    Wait = $true
+    PassThru = $true
+  }
+  if ($Arguments.Count -gt 0) {
+    $startParameters.ArgumentList = $Arguments
+  }
+  $process = Start-Process @startParameters
+  if ($process.ExitCode -ne 0) {
+    throw "$Name returned exit code $($process.ExitCode)."
+  }
 }
 
 try {
   if (-not $SkipBuild) {
     $msbuild = "C:\Program Files\Microsoft Visual Studio\2022\Professional\MSBuild\Current\Bin\MSBuild.exe"
-    & $msbuild (Join-Path $repo "ParserTests.cwproj") /t:Build "/p:Configuration=$Configuration" "/p:ClarionBinPath=L:\c11.1\bin" /m
+    & $msbuild (Join-Path $repo "ParserTests.cwproj") /t:Build `
+      "/p:Configuration=$Configuration" "/p:ClarionBinPath=L:\c11.1\bin" /m
     if ($LASTEXITCODE -ne 0) {
-      exit $LASTEXITCODE
+      throw "ParserTests build failed with exit code $LASTEXITCODE."
     }
   }
 
-  $bytes = [IO.File]::ReadAllBytes($fixture)
-  Set-UInt16LittleEndian $bytes (49408 + 10) 2
-  [IO.File]::WriteAllBytes($temporaryFiles[0], $bytes)
+  New-Item -ItemType Directory -Path $work -Force | Out-Null
+  & (Join-Path $PSScriptRoot "New-CorruptFixtures.ps1") `
+    -SourcePath $fixture -DestinationDirectory $corruptFixtureRoot
 
-  $bytes = [IO.File]::ReadAllBytes($fixture)
-  Set-UInt16LittleEndian $bytes (38912 + 6) 10271
-  [IO.File]::WriteAllBytes($temporaryFiles[1], $bytes)
-
-  $bytes = [IO.File]::ReadAllBytes($fixture)
-  Set-UInt16LittleEndian $bytes (38912 + 4) 12
-  [IO.File]::WriteAllBytes($temporaryFiles[2], $bytes)
-
-  $bytes = [IO.File]::ReadAllBytes($fixture)
-  Set-Int32LittleEndian $bytes 81924 50000
-  Set-Int32LittleEndian $bytes 92676 50000
-  [IO.File]::WriteAllBytes($temporaryFiles[3], $bytes)
-
-  $bytes = [IO.File]::ReadAllBytes($fixture)
-  Set-Int32LittleEndian $bytes 81924 -1
-  Set-Int32LittleEndian $bytes 92676 -1
-  [IO.File]::WriteAllBytes($temporaryFiles[4], $bytes)
-
-  $bytes = [IO.File]::ReadAllBytes($fixture)
-  Set-UInt16LittleEndian $bytes 81919 15
-  Set-UInt16LittleEndian $bytes 92671 15
-  foreach ($offset in 27931, 38939, 49435, 59931, 70427, 103195) {
-    $bytes[$offset] = 2
+  $falsePageCandidatePath = Join-Path $work "FalsePageCandidate.tmp"
+  $falsePageCandidateBytes = [IO.File]::ReadAllBytes($batchFixture)
+  $falsePageOuterOffset = 187392
+  $falsePageNestedOffset = $falsePageOuterOffset + 256
+  if ([BitConverter]::ToInt32($falsePageCandidateBytes, $falsePageOuterOffset) -ne $falsePageOuterOffset -or
+      [BitConverter]::ToUInt16($falsePageCandidateBytes, $falsePageOuterOffset + 4) -ne 995 -or
+      $falsePageCandidateBytes[$falsePageOuterOffset + 12] -ne 1) {
+    throw "The false-page-candidate source layout changed; review the regression mutation offsets."
   }
-  [IO.File]::WriteAllBytes($temporaryFiles[5], $bytes)
+  [BitConverter]::GetBytes([int]$falsePageNestedOffset).CopyTo(
+    $falsePageCandidateBytes,
+    $falsePageNestedOffset
+  )
+  [BitConverter]::GetBytes([uint16]0).CopyTo(
+    $falsePageCandidateBytes,
+    $falsePageNestedOffset + 4
+  )
+  [IO.File]::WriteAllBytes($falsePageCandidatePath, $falsePageCandidateBytes)
 
   $testExe = Join-Path $repo "ParserTests.exe"
-  $test = Start-Process -FilePath $testExe -WorkingDirectory $repo -WindowStyle Hidden -Wait -PassThru
-  exit $test.ExitCode
+  Invoke-TestProcess -Name "ParserTests.exe" -FilePath $testExe `
+    -Arguments @($corruptFixtureRoot)
+  Invoke-TestProcess -Name "False nested-page candidate regression" -FilePath $testExe `
+    -Arguments @("--verify-false-page-candidate", $falsePageCandidatePath)
+
+  $emptyFixturePath = Join-Path $work "EMPTY.TPS"
+  Invoke-TestProcess -Name "Empty TPS fixture creation" -FilePath $testExe `
+    -Arguments @("--create-empty", $emptyFixturePath)
+  Invoke-TestProcess -Name "Empty TPS verification" -FilePath $testExe `
+    -Arguments @("--verify-empty", $emptyFixturePath)
+
+  Write-Host "Parser regression tests passed ($Configuration)."
+}
+catch {
+  Write-Error -ErrorAction Continue $_
+  $exitCode = 1
 }
 finally {
-  foreach ($path in $temporaryFiles) {
-    Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+  if (Test-Path -LiteralPath $work -PathType Container) {
+    $resolvedWorkRoot = [IO.Path]::GetFullPath($workRoot).TrimEnd("\")
+    $resolvedWork = [IO.Path]::GetFullPath($work).TrimEnd("\")
+    if ([IO.Path]::GetDirectoryName($resolvedWork) -ne $resolvedWorkRoot) {
+      throw "Refusing to remove an unexpected regression path: $resolvedWork"
+    }
+    Remove-Item -LiteralPath $resolvedWork -Recurse -Force
   }
 }
+
+exit $exitCode

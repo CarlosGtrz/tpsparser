@@ -1,0 +1,21 @@
+! TPS field, MEMO/BLOB, and key-format constants exposed by TpsParserType.
+
+TpsFieldByte               EQUATE(1)
+TpsFieldShort              EQUATE(2)
+TpsFieldUShort             EQUATE(3)
+TpsFieldDate               EQUATE(4)
+TpsFieldTime               EQUATE(5)
+TpsFieldLong               EQUATE(6)
+TpsFieldULong              EQUATE(7)
+TpsFieldFloat              EQUATE(8)
+TpsFieldDouble             EQUATE(9)
+TpsFieldBcd                EQUATE(0AH)
+TpsFieldString             EQUATE(12H)
+TpsFieldCString            EQUATE(13H)
+TpsFieldPString            EQUATE(14H)
+TpsFieldGroup              EQUATE(16H)
+TpsMemoFieldType           EQUATE(0FCH)
+
+TpsMemoBinaryFlag          EQUATE(2)
+TpsBlobFlag                EQUATE(4)
+TpsKeyFieldDescendingFlag  EQUATE(1)

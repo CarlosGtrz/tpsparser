@@ -18,13 +18,24 @@
 
 !Type declarations
 
+  INCLUDE('TpsFormat.inc'),ONCE
+
 TpsTypeNameMax      EQUATE(32)
+TpsMemoStateEmpty   EQUATE(0)
+TpsMemoStateComplete EQUATE(1)
+TpsMemoStateDamaged EQUATE(2)
+TpsKeyFlagDup       EQUATE(1)
+TpsKeyFlagOpt       EQUATE(2)
+TpsKeyFlagNoCase    EQUATE(4)
+TpsKeyFlagPrimary   EQUATE(10H)
 
 TpsDataQueue        QUEUE,TYPE
 TableNo               LONG
 RecordNumber          LONG
 PayloadLen            LONG
 Payload               &STRING
+SourceOffset          LONG
+Arrival               LONG
                     END
 
 TpsMemoQueue        QUEUE,TYPE
@@ -61,11 +72,40 @@ TypeName              STRING(TpsTypeNameMax)
 Offset                LONG
 Length                LONG
 Elements              LONG
+Flags                 LONG
+IndexNo               LONG
+StringLength          LONG
+StringMask            &STRING
 BcdDigitsAfterDecimal LONG
 BcdLengthOfElement    LONG
 IsMemo                BYTE
 IsBlob                BYTE
 MemoIndex             LONG
+MemoLength            LONG
+MemoFlags             LONG
+ExternalName          &STRING
+                    END
+
+TpsKeyQueue         QUEUE,TYPE
+TableNo               LONG
+KeyNo                 LONG
+Name                  &STRING
+ExternalName          &STRING
+Flags                 LONG
+FieldCount            LONG
+                    END
+
+TpsKeyFieldQueue    QUEUE,TYPE
+TableNo               LONG
+KeyNo                 LONG
+Rank                  LONG
+FieldIndex            LONG
+Flags                 LONG
+Ascending             BYTE
+                    END
+
+TpsProgressSinkType CLASS,TYPE,MODULE('TpsParser'),LINK('TpsParser')
+Update                PROCEDURE(STRING pStage,LONG pCompleted,LONG pTotal),VIRTUAL
                     END
 
 TpsParserType       CLASS,TYPE,MODULE('TpsParser'),LINK('TpsParser'),TYPE
@@ -74,9 +114,13 @@ TpsParserType       CLASS,TYPE,MODULE('TpsParser'),LINK('TpsParser'),TYPE
 Init                  PROCEDURE(STRING pFileName),LONG
 Init                  PROCEDURE(STRING pFileName,STRING pOwner),LONG
 Init                  PROCEDURE(STRING pFileName,STRING pOwner,BYTE pIgnoreErrors),LONG
+InitMetadata          PROCEDURE(STRING pFileName),LONG
+InitMetadata          PROCEDURE(STRING pFileName,STRING pOwner),LONG
 InitRecovering        PROCEDURE(STRING pFileName),LONG
 InitRecovering        PROCEDURE(STRING pFileName,STRING pOwner),LONG
 Kill                  PROCEDURE
+SetProgressSink       PROCEDURE(*TpsProgressSinkType pSink)
+ClearProgressSink     PROCEDURE
 
 ! Error information
 GetErrorCode          PROCEDURE,LONG
@@ -86,18 +130,25 @@ GetError              PROCEDURE,STRING
 Tables                PROCEDURE,LONG
 GetTableName          PROCEDURE(LONG pTableIndex),STRING
 SetTable              PROCEDURE(LONG pTableIndex = 0),LONG,PROC
+GetCurrentTableNumber PROCEDURE,LONG
+GetRecordLength       PROCEDURE,LONG
 
 ! Record navigation
 Records               PROCEDURE,LONG
 Get                   PROCEDURE(LONG pRecordNo),LONG,PROC
 Set                   PROCEDURE(LONG pRecordNo = 0),LONG,PROC
 Next                  PROCEDURE,BYTE
+GetCurrentRecordNumber PROCEDURE,LONG
+GetCurrentRecordOffset PROCEDURE,LONG
+GetRecoveryIssueCount PROCEDURE,LONG
+GetSourceEncrypted    PROCEDURE,BYTE
 
 ! Field metadata
 Fields                PROCEDURE,LONG
 GetFieldNameByNumber  PROCEDURE(LONG pFieldNo),STRING
 GetFieldType          PROCEDURE(STRING pFieldName),STRING
 GetFieldTypeByNumber  PROCEDURE(LONG pFieldNo),STRING
+GetFieldTypeCodeByNumber PROCEDURE(LONG pFieldNo),LONG
 GetFieldDimension     PROCEDURE(STRING pFieldName),LONG
 GetFieldDimensionByNumber PROCEDURE(LONG pFieldNo),LONG
 GetFieldSize          PROCEDURE(STRING pFieldName),LONG
@@ -105,6 +156,25 @@ GetFieldSizeByNumber  PROCEDURE(LONG pFieldNo),LONG
 GetFieldDecimals      PROCEDURE(STRING pFieldName),LONG
 GetFieldDecimalsByNumber  PROCEDURE(LONG pFieldNo),LONG
 GetFieldNumber        PROCEDURE(STRING pFieldName),LONG
+GetFieldOffsetByNumber PROCEDURE(LONG pFieldNo),LONG
+GetFieldLengthByNumber PROCEDURE(LONG pFieldNo),LONG
+GetFieldFlagsByNumber PROCEDURE(LONG pFieldNo),LONG
+GetFieldIndexByNumber PROCEDURE(LONG pFieldNo),LONG
+GetFieldStringMaskByNumber PROCEDURE(LONG pFieldNo),STRING
+GetFieldIsMemoByNumber PROCEDURE(LONG pFieldNo),BYTE
+GetFieldIsBlobByNumber PROCEDURE(LONG pFieldNo),BYTE
+GetMemoLengthByNumber PROCEDURE(LONG pFieldNo),LONG
+GetMemoFlagsByNumber PROCEDURE(LONG pFieldNo),LONG
+GetExternalNameByNumber PROCEDURE(LONG pFieldNo),STRING
+
+! Key and index metadata
+Keys                  PROCEDURE,LONG
+GetKeyName            PROCEDURE(LONG pKeyNo),STRING
+GetKeyFlags           PROCEDURE(LONG pKeyNo),LONG
+GetKeyExternalName    PROCEDURE(LONG pKeyNo),STRING
+GetKeyFieldCount      PROCEDURE(LONG pKeyNo),LONG
+GetKeyFieldIndex      PROCEDURE(LONG pKeyNo,LONG pRank),LONG
+GetKeyFieldAscending  PROCEDURE(LONG pKeyNo,LONG pRank),BYTE
 
 ! Generic field value
 GetField              PROCEDURE(STRING pFieldName,LONG pDimension = 0),STRING
@@ -139,11 +209,14 @@ GetMemoField          PROCEDURE(STRING pFieldName),STRING
 GetMemoFieldByNumber  PROCEDURE(LONG pFieldNo),STRING
 GetBlobField          PROCEDURE(STRING pFieldName,*BLOB pBlob),LONG,PROC
 GetBlobFieldByNumber  PROCEDURE(LONG pFieldNo,*BLOB pBlob),LONG,PROC
+GetMemoStateByNumber  PROCEDURE(LONG pFieldNo),BYTE
+GetBlobValueByNumber PROCEDURE(LONG pFieldNo,*LONG pBlobLength),STRING
 
 ! Protected diagnostic state
 Src                   &STRING,PROTECTED
 SrcLen                LONG,PROTECTED
 GetBlobPreviewByNumber PROCEDURE(LONG pFieldNo,LONG pMaxBytes,*LONG pBlobLength),STRING,PROTECTED
+AllowMissingDefinition PROCEDURE,BYTE,PROTECTED,VIRTUAL
 
 ! Internal members
 WorkPage              &STRING,PRIVATE
@@ -158,14 +231,26 @@ BlobPreviewBuffer     &STRING,PRIVATE
 IgnoreErrors          BYTE,PRIVATE
 ParsePass             BYTE,PRIVATE
 Arrival               LONG,PRIVATE
+CurrentPageOffset     LONG,PRIVATE
+CurrentRecordLength   LONG,PRIVATE
+RecoveryIssues        LONG,PRIVATE
+SourceEncrypted       BYTE,PRIVATE
+ProgressSink          &TpsProgressSinkType,PRIVATE
+DataRangeTable        LONG,PRIVATE
+DataRangeFirst        LONG,PRIVATE
+DataRangeCount        LONG,PRIVATE
+MemoQDirty            BYTE,PRIVATE
+ParsedLayoutTable     LONG,PRIVATE
 DataQ                 &TpsDataQueue,PROTECTED
 MemoQ                 &TpsMemoQueue,PROTECTED
 TableDefQ             &TpsTableDefQueue,PROTECTED
 TableNameQ            &TpsTableNameQueue,PROTECTED
 FieldQ                &TpsFieldQueue,PROTECTED
+KeyQ                  &TpsKeyQueue,PROTECTED
+KeyFieldQ             &TpsKeyFieldQueue,PROTECTED
 Construct             PROCEDURE,PRIVATE
 Destruct              PROCEDURE,PRIVATE
-InitCore              PROCEDURE(STRING pFileName,STRING pOwner,BYTE pHasOwner,BYTE pIgnoreErrors),LONG,PRIVATE
+InitCore              PROCEDURE(STRING pFileName,STRING pOwner,BYTE pHasOwner,BYTE pIgnoreErrors,BYTE pMetadataOnly),LONG,PRIVATE
 ValidateHeader        PROCEDURE,LONG,PRIVATE
 ResolveTableNumber    PROCEDURE(LONG pTableIndex),LONG,PRIVATE
 GetTableNameByTableNumber PROCEDURE(LONG pTableNo),STRING,PRIVATE
@@ -176,7 +261,7 @@ BuildOwnerKey         PROCEDURE(STRING pOwner,*STRING pKey),PRIVATE
 ShuffleKey            PROCEDURE(*STRING pKey),PRIVATE
 DecryptRange          PROCEDURE(LONG pOffset,LONG pLength,*STRING pKey),LONG,PRIVATE
 DecryptBlock64        PROCEDURE(LONG pOffset,*STRING pKey),PRIVATE
-ParseTps              PROCEDURE,LONG,PRIVATE
+ParseTps              PROCEDURE(BYTE pMetadataOnly),LONG,PRIVATE
 ParseAllBlocks        PROCEDURE,LONG,PRIVATE
 ParseBlock            PROCEDURE(LONG pStart,LONG pEnd),LONG,PRIVATE
 IsCompletePage        PROCEDURE(LONG pPos,LONG pPageSize,LONG pEnd),BYTE,PRIVATE
@@ -186,16 +271,23 @@ DecodeRleCount        PROCEDURE(LONG pCompressedStart,LONG pCompressedLen,*LONG 
 ParseRecords          PROCEDURE(*STRING pData,LONG pLen,LONG pRecordCount),LONG,PRIVATE
 ProcessRecord         PROCEDURE(*STRING pRecord,LONG pRecordLen,LONG pHeaderLen),LONG,PRIVATE
 ParseTableLayout      PROCEDURE,LONG,PRIVATE
+ParseFieldDefinitions PROCEDURE(*STRING pDefinition,LONG pTotalLen,*LONG pPosition,LONG pFieldCount),LONG,PRIVATE
+ParseMemoDefinitions PROCEDURE(*STRING pDefinition,LONG pTotalLen,*LONG pPosition,LONG pMemoCount,LONG pFirstFieldNo),LONG,PRIVATE
+ParseKeyDefinitions  PROCEDURE(*STRING pDefinition,LONG pTotalLen,*LONG pPosition,LONG pKeyCount),LONG,PRIVATE
 TableDefinitionIsComplete PROCEDURE(LONG pTableNo,*LONG pTotalLen),BYTE,PRIVATE
 ValidateRecordPayload PROCEDURE(LONG pTableNo,*STRING pData,LONG pLen),LONG,PRIVATE
 ReadZeroString        PROCEDURE(*STRING pData,LONG pLen,*LONG pPos),LONG,PRIVATE
 StripTablePrefix      PROCEDURE(STRING pName),STRING,PRIVATE
 ResolveFieldValue     PROCEDURE(LONG pFieldNo,LONG pDimension,*LONG pOffset,*LONG pLength),BYTE,PRIVATE
+EnsureDataRange       PROCEDURE,PRIVATE
+InvalidateDataRange   PROCEDURE,PRIVATE
+EnsureMemoQSorted     PROCEDURE,PRIVATE
 CompareMemoKey        PROCEDURE(LONG pIndex,LONG pOwner,LONG pMemoIndex),LONG,PRIVATE
 FindFirstMemoChunk    PROCEDURE(LONG pOwner,LONG pMemoIndex),LONG,PRIVATE
-MemoRawLength         PROCEDURE(LONG pOwner,LONG pMemoIndex),LONG,PRIVATE
 CopyMemoRaw           PROCEDURE(LONG pOwner,LONG pMemoIndex,*STRING pRaw,LONG pMaxLen),LONG,PRIVATE
 MemoIsComplete        PROCEDURE(LONG pOwner,LONG pMemoIndex,*LONG pRawLen),BYTE,PRIVATE
+FindCurrentKeyRecord  PROCEDURE(LONG pKeyNo),LONG,PRIVATE
+FindCurrentKeyFieldRecord PROCEDURE(LONG pKeyNo,LONG pRank),LONG,PRIVATE
 LoadBlobPreviewByNumber PROCEDURE(LONG pFieldNo,LONG pMaxBytes,*LONG pBlobLength),LONG,PRIVATE
 RollbackData          PROCEDURE(LONG pKeep),PRIVATE
 RollbackMemos         PROCEDURE(LONG pKeep),PRIVATE
@@ -205,10 +297,12 @@ FreeData              PROCEDURE,PRIVATE
 FreeMemos             PROCEDURE,PRIVATE
 FreeTableDefs         PROCEDURE,PRIVATE
 FreeTableNames        PROCEDURE,PRIVATE
-FreeFields            PROCEDURE,PRIVATE
+FreeFields            PROCEDURE,PROTECTED
+FreeKeys              PROCEDURE,PRIVATE
 SetReturnBuffer       PROCEDURE(*STRING pData,LONG pPos,LONG pLen),STRING,PRIVATE
 TrimFixedString       PROCEDURE(*STRING pData,LONG pPos,LONG pLen),STRING,PRIVATE
 SetLastError          PROCEDURE(LONG pError,STRING pText),LONG,PRIVATE
+ReportProgress        PROCEDURE(STRING pStage,LONG pCompleted,LONG pTotal),PRIVATE
 ReadByte              PROCEDURE(*STRING pData,LONG pPos),LONG,PRIVATE
 ReadLeShort           PROCEDURE(*STRING pData,LONG pPos),LONG,PRIVATE
 ReadBeShort           PROCEDURE(*STRING pData,LONG pPos),LONG,PRIVATE
@@ -254,6 +348,7 @@ TpsErrFieldDefMissing   EQUATE(1410)
 TpsErrFieldDataInvalid  EQUATE(1411)
 TpsErrFieldTypeUnsupported EQUATE(1412)
 TpsErrFieldAmbiguous    EQUATE(1413)
+TpsErrIndexDef      EQUATE(1414)
 TpsErrRecordIndex   EQUATE(1501)
 TpsErrRecordNotFound    EQUATE(1502)
 TpsErrBlobContext   EQUATE(1601)

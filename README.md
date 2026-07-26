@@ -23,10 +23,12 @@ The original project describes itself as reverse-engineered TPS parsing software
 
 Include these files in your Clarion project:
 
+- `TpsFormat.inc` - TPS field, MEMO/BLOB, and key-format equates
 - `TpsParser.inc` - class declaration and queue types
 - `TpsParser.clw` - class implementation
 
-Include the class in your source:
+`TpsParser.inc` includes `TpsFormat.inc` transitively, so client source still
+needs only the parser include:
 
 ```clarion
   INCLUDE('TpsParser.inc'),ONCE
@@ -93,6 +95,51 @@ Clarion cannot distinguish an `Init(STRING,BYTE)` overload from the existing `In
 
 Recovery discards every record, MEMO fragment, table-definition fragment, and table name staged from a malformed page. It continues with later pages. Strict mode aborts at the first malformed block, page, RLE stream, record stream, field layout, or record value.
 
+`GetRecoveryIssueCount()` reports how many malformed block/page incidents were
+skipped by the recovery passes. `GetSourceEncrypted()` is `TRUE` when an
+owner-based initialization found that the plaintext header was invalid and
+successfully took the decryption path.
+
+Specialized recovery subclasses can override the protected virtual
+`AllowMissingDefinition()` method. Its default is `FALSE`; ordinary parser
+initialization still requires a complete table definition.
+
+## Metadata-only parsing
+
+Use `InitMetadata` when only table, field, MEMO/BLOB, and key definitions are
+needed:
+
+```clarion
+Result = Parser.InitMetadata(FileName)
+Result = Parser.InitMetadata(FileName,Owner)
+```
+
+Metadata-only initialization loads and decrypts the source as needed, scans
+definitions, and selects the first table without scanning record or MEMO/BLOB
+content. Consequently, `Records()` returns zero.
+
+## Progress callbacks
+
+Derive a sink from `TpsProgressSinkType`, attach it before initialization, and
+clear it before the sink goes out of scope:
+
+```clarion
+ProgressSinkType CLASS(TpsProgressSinkType),TYPE
+Update             PROCEDURE(STRING pStage,LONG pCompleted,LONG pTotal),VIRTUAL,DERIVED
+                 END
+
+Sink  ProgressSinkType
+
+Parser.SetProgressSink(Sink)
+Result = Parser.Init(FileName)
+Parser.ClearProgressSink()
+```
+
+Progress is byte-based and uses the stages `Loading source`,
+`Decrypting source`, `Scanning definitions`, and
+`Scanning records and MEMO/BLOB data`. Metadata-only initialization does not
+emit the final record-data stage.
+
 ## Reading field values
 
 Use `GetField` for a string representation of the field value:
@@ -139,6 +186,18 @@ If you do not need the result code, the method can be called as a procedure:
 Parser.GetBlobField('DocumentBlob',TargetFileBlob)
 ```
 
+For a string-backed full value, use the numeric field API:
+
+```clarion
+BlobValue = Parser.GetBlobValueByNumber(FieldNo,BlobLength)
+```
+
+The returned value uses the same class-owned scratch-buffer rules as other
+variable-length strings. `GetMemoStateByNumber(FieldNo)` distinguishes
+`TpsMemoStateEmpty`, `TpsMemoStateComplete`, and `TpsMemoStateDamaged`.
+A damaged state also leaves a relevant parser error in `GetErrorCode()` and
+`GetError()`.
+
 ## Arrays / DIM fields
 
 `GetFieldDimension('FieldName')` returns the total number of array elements. TPS metadata stores arrays flattened, so `DIM(3,5)` is exposed as `15` elements.
@@ -171,20 +230,45 @@ final extension (for example, `CUSTOMER.TPS` returns `CUSTOMER`). Unnamed
 tables in a superfile continue to use their field prefix, then their numeric
 table number as a final fallback.
 
+Records are enumerated in physical source/page order, with arrival order used
+inside a page. `Get(recordIndex)` takes a 1-based ordinal in that enumeration.
+`GetCurrentRecordNumber()` exposes the TPS record identifier, while
+`GetCurrentRecordOffset()` exposes the source page offset. The latter is not an
+exact byte offset inside a compressed page.
+
 ## Useful metadata methods
 
 ```clarion
 RecordCount = Parser.Records()
+RecordId    = Parser.GetCurrentRecordNumber()
+PageOffset  = Parser.GetCurrentRecordOffset()
+RecordBytes = Parser.GetRecordLength()
 FieldCount  = Parser.Fields()
 FieldName   = Parser.GetFieldNameByNumber(1)
 FieldType   = Parser.GetFieldType('Name')
 FieldTypeNo = Parser.GetFieldTypeByNumber(1)
-FieldSize   = Parser.GetFieldSize('Name')       ! string length, numeric bytes, BCD digits
+FieldCode   = Parser.GetFieldTypeCodeByNumber(1)
+FieldOffset = Parser.GetFieldOffsetByNumber(1)
+FieldLength = Parser.GetFieldLengthByNumber(1)
+FieldFlags  = Parser.GetFieldFlagsByNumber(1)
+FieldIndex  = Parser.GetFieldIndexByNumber(1)
+StringMask  = Parser.GetFieldStringMaskByNumber(1)
+FieldSize   = Parser.GetFieldSize('Name')       ! string length or numeric/BCD storage bytes
 Decimals    = Parser.GetFieldDecimals('Amount') ! BCD decimals, otherwise 0
 FieldNo     = Parser.GetFieldNumber('Name')
 ErrorCode   = Parser.GetErrorCode()
 ErrorText   = Parser.GetError()
 ```
+
+`GetRecordLength()` is the record length declared by the currently selected
+table. Field offsets and key component field indexes are zero-based TPS
+metadata values. `TpsFormat.inc` exposes the corresponding `TpsField...`,
+`TpsMemo...`, `TpsBlob...`, and `TpsKey...` equates.
+
+MEMO/BLOB metadata is available through
+`GetFieldIsMemoByNumber`, `GetFieldIsBlobByNumber`,
+`GetMemoLengthByNumber`, `GetMemoFlagsByNumber`, and
+`GetExternalNameByNumber`.
 
 `GetFieldType` / `GetFieldTypeByNumber` return Clarion-style type names. Current possible values are:
 
@@ -208,6 +292,25 @@ BLOB
 UNKNOWN
 ```
 
+## Key metadata
+
+Keys are scoped to the selected table:
+
+```clarion
+KeyCount     = Parser.Keys()
+KeyName      = Parser.GetKeyName(1)
+KeyFlags     = Parser.GetKeyFlags(1)
+ExternalName = Parser.GetKeyExternalName(1)
+PartCount    = Parser.GetKeyFieldCount(1)
+FieldIndex   = Parser.GetKeyFieldIndex(1,1)
+Ascending    = Parser.GetKeyFieldAscending(1,1)
+```
+
+Key numbers and component ranks are 1-based. The returned component field
+index is the zero-based index stored in TPS metadata. Public flag equates
+include `TpsKeyFlagDup`, `TpsKeyFlagOpt`, `TpsKeyFlagNoCase`, and
+`TpsKeyFlagPrimary`.
+
 ## Return values
 
 These methods return parser error codes:
@@ -217,6 +320,8 @@ These methods return parser error codes:
 | `Init(fileName)` | `0` on success, otherwise `GetErrorCode()` |
 | `Init(fileName,owner)` | `0` on success, otherwise `GetErrorCode()` |
 | `Init(fileName,owner,ignoreErrors)` | `0` on success, otherwise `GetErrorCode()` |
+| `InitMetadata(fileName)` | `0` on success, otherwise `GetErrorCode()` |
+| `InitMetadata(fileName,owner)` | `0` on success, otherwise `GetErrorCode()` |
 | `InitRecovering(fileName)` | `0` on success, otherwise `GetErrorCode()` |
 | `InitRecovering(fileName,owner)` | `0` on success, otherwise `GetErrorCode()` |
 | `SetTable(tableIndex)` | `0` on success, otherwise `GetErrorCode()` |
@@ -305,6 +410,7 @@ END
 | 1411 | Invalid field layout or record data |
 | 1412 | Unsupported TPS field type |
 | 1413 | Ambiguous case-insensitive full/short field, MEMO, or BLOB name |
+| 1414 | Invalid or incomplete key/index definition |
 
 ### Record navigation errors
 
@@ -325,14 +431,26 @@ END
 
 The deterministic fixtures under `tests\fixtures` are generated by `GenerateFixtures.clw`. Normal test runs consume the committed files; rerun the generator only when fixture coverage changes.
 
-`ParserTests.clw` is non-interactive and exits nonzero on the first failed assertion. `tests\RunRegression.ps1` builds it, creates disposable corrupted copies for page-count, RLE, page-boundary, fragment, and BLOB recovery checks, runs it, and removes those copies.
+`ParserTests.clw` is non-interactive and exits nonzero on the first failed
+assertion. `tests\RunRegression.ps1` builds it, creates a unique disposable
+work directory, generates guarded corrupted copies, checks a false nested-page
+candidate and an empty TPS file, runs the suite, and removes the work
+directory.
 
 ```powershell
 .\tests\RunRegression.ps1 -Configuration Debug
 .\tests\RunRegression.ps1 -Configuration Release
 ```
 
-The fixtures cover TIME seconds/hundredths and midnight, scaled DECIMAL values below one and zero, fixed/C/P strings, arrays, binary GROUP content, a 40,000-byte record, a 12 KB MEMO, a 40 KB multi-chunk BLOB, ambiguous aliases, `UNNAMED` table fallback, ASCII owner encryption, and owner calls on plaintext files. Because the Clarion TopSpeed driver rejects declarations above its record-size ceiling, the large-record TPS is assembled byte-for-byte by the Clarion generator and is also accepted by the C# reference parser.
+The fixtures cover TIME seconds/hundredths and midnight, scaled DECIMAL values
+below one and zero, fixed/C/P strings, arrays, binary GROUP content, field and
+key metadata, a 40,000-byte record, a 12 KB MEMO, a 40 KB multi-chunk BLOB,
+empty and fragmented MEMO/BLOB data, superfile navigation, a 10,001-record
+page-boundary case, ambiguous aliases, `UNNAMED` table fallback, ASCII owner
+encryption, and owner calls on plaintext files. Because the Clarion TopSpeed
+driver rejects declarations above its record-size ceiling, the large-record
+TPS is assembled byte-for-byte by the Clarion generator and is also accepted
+by the C# reference parser.
 
 ## Notes
 
@@ -340,5 +458,5 @@ The fixtures cover TIME seconds/hundredths and midnight, scaled DECIMAL values b
 - `GetErrorCode()` returns the numeric error code. `GetError()` returns a single-line diagnostic string with extra context when available.
 - `Next` returns `FALSE` when a record is available and `TRUE` at EOF; it does not return an error code.
 - Call `Kill` when finished to release parser buffers and queues.
-- Index metadata is intentionally not exposed.
+- Field, MEMO/BLOB, and key metadata are exposed for schema inspection.
 - Recovery is opt-in. A recovered oversized or negative BLOB length returns only the available payload bytes; a missing length header returns an empty BLOB.

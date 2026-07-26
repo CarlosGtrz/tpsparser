@@ -23,7 +23,6 @@
 
   INCLUDE('TpsParser.inc'),ONCE
 
-TpsWorkSlack        EQUATE(8192)
 TpsFileNameMax      EQUATE(260)
 TpsDosBufferMax     EQUATE(32768)
 TpsDosReadMode      EQUATE(40H)
@@ -41,22 +40,6 @@ TpsRecData          EQUATE(0F3H)
 TpsRecMemo          EQUATE(0FCH)
 TpsRecTableDef      EQUATE(0FAH)
 TpsRecTableName     EQUATE(0FEH)
-TpsFieldByte        EQUATE(1)
-TpsFieldShort       EQUATE(2)
-TpsFieldUShort      EQUATE(3)
-TpsFieldDate        EQUATE(4)
-TpsFieldTime        EQUATE(5)
-TpsFieldLong        EQUATE(6)
-TpsFieldULong       EQUATE(7)
-TpsFieldFloat       EQUATE(8)
-TpsFieldDouble      EQUATE(9)
-TpsFieldBcd         EQUATE(0AH)
-TpsFieldString      EQUATE(12H)
-TpsFieldCString     EQUATE(13H)
-TpsFieldPString     EQUATE(14H)
-TpsFieldGroup       EQUATE(16H)
-TpsMemoFieldType    EQUATE(0FCH)
-TpsBlobFlag         EQUATE(4)
 TpsBlobLenPrefix    EQUATE(4)
 TpsFlagRecLen       EQUATE(128)
 TpsFlagHeaderLen    EQUATE(64)
@@ -72,33 +55,50 @@ TpsByteMask         EQUATE(0FFH)
 TpsWordNotMask      EQUATE(0FFFFFFFFH)
 TpsPassMetadata     EQUATE(1)
 TpsPassContent      EQUATE(2)
+TpsDamagedMemoSequence EQUATE(-1)
+
+TpsProgressSinkType.Update PROCEDURE(STRING pStage,LONG pCompleted,LONG pTotal)
+  CODE
+
+TpsParserType.AllowMissingDefinition PROCEDURE
+  CODE
+  RETURN FALSE
 
 TpsParserType.Init  PROCEDURE(STRING pFileName)
   CODE
-  RETURN SELF.InitCore(pFileName,'',FALSE,FALSE)
+  RETURN SELF.InitCore(pFileName,'',FALSE,FALSE,FALSE)
 
 TpsParserType.Init  PROCEDURE(STRING pFileName,STRING pOwner)
   CODE
-  RETURN SELF.InitCore(pFileName,pOwner,TRUE,FALSE)
+  RETURN SELF.InitCore(pFileName,pOwner,TRUE,FALSE,FALSE)
+
+TpsParserType.InitMetadata PROCEDURE(STRING pFileName)
+  CODE
+  RETURN SELF.InitCore(pFileName,'',FALSE,FALSE,TRUE)
+
+TpsParserType.InitMetadata PROCEDURE(STRING pFileName,STRING pOwner)
+  CODE
+  RETURN SELF.InitCore(pFileName,pOwner,TRUE,FALSE,TRUE)
 
 TpsParserType.InitRecovering  PROCEDURE(STRING pFileName)
   CODE
-  RETURN SELF.InitCore(pFileName,'',FALSE,TRUE)
+  RETURN SELF.InitCore(pFileName,'',FALSE,TRUE,FALSE)
 
 TpsParserType.Init  PROCEDURE(STRING pFileName,STRING pOwner,BYTE pIgnoreErrors)
   CODE
-  RETURN SELF.InitCore(pFileName,pOwner,TRUE,pIgnoreErrors)
+  RETURN SELF.InitCore(pFileName,pOwner,TRUE,pIgnoreErrors,FALSE)
 
 TpsParserType.InitRecovering  PROCEDURE(STRING pFileName,STRING pOwner)
   CODE
-  RETURN SELF.InitCore(pFileName,pOwner,TRUE,TRUE)
+  RETURN SELF.InitCore(pFileName,pOwner,TRUE,TRUE,FALSE)
 
-TpsParserType.InitCore PROCEDURE(STRING pFileName,STRING pOwner,BYTE pHasOwner,BYTE pIgnoreErrors)
+TpsParserType.InitCore PROCEDURE(STRING pFileName,STRING pOwner,BYTE pHasOwner,BYTE pIgnoreErrors,BYTE pMetadataOnly)
 Result                LONG
   CODE
   SELF.Kill()
   SELF.LastError = 0
   SELF.IgnoreErrors = pIgnoreErrors
+  SELF.SourceEncrypted = FALSE
   SELF.SourceFileName = pFileName
   Result = SELF.LoadSource(pFileName)
   IF Result <> 0
@@ -107,6 +107,7 @@ Result                LONG
   IF pHasOwner
     Result = SELF.ValidateHeader()
     IF Result <> 0
+      SELF.SourceEncrypted = TRUE
       Result = SELF.SetLastError(0,'')
       Result = SELF.DecryptSource(pOwner)
       IF Result <> 0
@@ -114,16 +115,19 @@ Result                LONG
       END
     END
   END
-  Result = SELF.ParseTps()
+  Result = SELF.ParseTps(pMetadataOnly)
   IF Result <> 0
     RETURN Result
   END
   SORT(SELF.TableDefQ,+SELF.TableDefQ.TableNo,+SELF.TableDefQ.BlockNo)
-  SORT(SELF.DataQ,+SELF.DataQ.TableNo,+SELF.DataQ.RecordNumber)
-  SORT(SELF.MemoQ,+SELF.MemoQ.TableNo,+SELF.MemoQ.Owner,+SELF.MemoQ.MemoIndex,+SELF.MemoQ.Sequence)
-  Result = SELF.SetTable(0)
-  IF Result <> 0
-    RETURN Result
+  SORT(SELF.DataQ,+SELF.DataQ.TableNo,+SELF.DataQ.SourceOffset,+SELF.DataQ.Arrival)
+  SELF.InvalidateDataRange()
+  SELF.EnsureMemoQSorted()
+  IF ~SELF.AllowMissingDefinition() OR SELF.Tables() > 0
+    Result = SELF.SetTable(0)
+    IF Result <> 0
+      RETURN Result
+    END
   END
   RETURN SELF.SetLastError(0,'')
 
@@ -140,6 +144,7 @@ TpsParserType.Kill  PROCEDURE
   SELF.FreeTableDefs()
   SELF.FreeTableNames()
   SELF.FreeFields()
+  SELF.FreeKeys()
   IF ~SELF.ReturnBuffer &= NULL
     DISPOSE(SELF.ReturnBuffer)
   END
@@ -157,6 +162,36 @@ TpsParserType.Kill  PROCEDURE
   SELF.IgnoreErrors = FALSE
   SELF.ParsePass = 0
   SELF.Arrival = 0
+  SELF.CurrentPageOffset = 0
+  SELF.CurrentRecordLength = 0
+  SELF.RecoveryIssues = 0
+  SELF.SourceEncrypted = FALSE
+  SELF.InvalidateDataRange()
+  SELF.MemoQDirty = TRUE
+
+TpsParserType.SetProgressSink PROCEDURE(*TpsProgressSinkType pSink)
+  CODE
+  SELF.ProgressSink &= pSink
+
+TpsParserType.ClearProgressSink PROCEDURE
+  CODE
+  SELF.ProgressSink &= NULL
+
+TpsParserType.ReportProgress PROCEDURE(STRING pStage,LONG pCompleted,LONG pTotal)
+  CODE
+  IF SELF.ProgressSink &= NULL
+    RETURN
+  END
+  IF pCompleted < 0
+    pCompleted = 0
+  END
+  IF pTotal < 1
+    pTotal = 1
+  END
+  IF pCompleted > pTotal
+    pCompleted = pTotal
+  END
+  SELF.ProgressSink.Update(pStage,pCompleted,pTotal)
 
 TpsParserType.GetErrorCode  PROCEDURE
   CODE
@@ -204,7 +239,7 @@ Result                    LONG
   END
   TableNo = SELF.ResolveTableNumber(pTableIndex)
   IF TableNo = 0
-    RETURN SELF.SetLastError(TpsErrTableIndex,'Invalid table index ' & pTableIndex & '; table count=' & SELF.Tables())
+    RETURN SELF.SetLastError(TpsErrTableIndex,'That table does not exist in this file. Details: index=' & pTableIndex & ' tables=' & SELF.Tables())
   END
   SELF.CurrentTable = TableNo
   SELF.CurrentRecord = 0
@@ -214,43 +249,37 @@ Result                    LONG
   END
   RETURN SELF.SetLastError(0,'')
 
-TpsParserType.Records   PROCEDURE
-I                         LONG
-Count                     LONG
+TpsParserType.GetCurrentTableNumber PROCEDURE
   CODE
-  Count = 0
-  LOOP I = 1 TO RECORDS(SELF.DataQ)
-    GET(SELF.DataQ,I)
-    IF SELF.DataQ.TableNo = SELF.CurrentTable
-      Count += 1
-    END
-  END
-  RETURN Count
+  RETURN SELF.CurrentTable
+
+TpsParserType.GetRecordLength PROCEDURE
+  CODE
+  RETURN SELF.CurrentRecordLength
+
+TpsParserType.Records   PROCEDURE
+  CODE
+  SELF.EnsureDataRange()
+  RETURN SELF.DataRangeCount
 
 TpsParserType.Get   PROCEDURE(LONG pRecordNo)
-I                     LONG
-Count                 LONG
   CODE
+  SELF.EnsureDataRange()
   IF pRecordNo < 1
     SELF.CurrentRecord = 0
-    RETURN SELF.SetLastError(TpsErrRecordIndex,'Invalid record index ' & pRecordNo)
+    RETURN SELF.SetLastError(TpsErrRecordIndex,'That record does not exist in this table. Details: index=' & pRecordNo)
   END
-  Count = 0
-  LOOP I = 1 TO RECORDS(SELF.DataQ)
-    GET(SELF.DataQ,I)
-    IF SELF.DataQ.TableNo = SELF.CurrentTable
-      Count += 1
-      IF Count = pRecordNo
-        SELF.CurrentRecord = I
-        RETURN SELF.SetLastError(0,'')
-      END
-    END
+  IF pRecordNo > SELF.DataRangeCount
+    SELF.CurrentRecord = 0
+    RETURN SELF.SetLastError(TpsErrRecordNotFound,'That record does not exist in this table. Details: index=' & pRecordNo & ' records=' & SELF.DataRangeCount)
   END
-  SELF.CurrentRecord = 0
-  RETURN SELF.SetLastError(TpsErrRecordNotFound,'Record index not found ' & pRecordNo & '; record count=' & Count)
+  SELF.CurrentRecord = SELF.DataRangeFirst + pRecordNo - 1
+  GET(SELF.DataQ,SELF.CurrentRecord)
+  RETURN SELF.SetLastError(0,'')
 
 TpsParserType.Set   PROCEDURE(LONG pRecordNo)
   CODE
+  SELF.EnsureDataRange()
   IF pRecordNo = 0
     SELF.CurrentRecord = 0
     RETURN SELF.SetLastError(0,'')
@@ -259,17 +288,47 @@ TpsParserType.Set   PROCEDURE(LONG pRecordNo)
 
 TpsParserType.Next  PROCEDURE
   CODE
-  LOOP
-    SELF.CurrentRecord += 1
-    IF SELF.CurrentRecord > RECORDS(SELF.DataQ)
-      SELF.CurrentRecord = 0
-      RETURN TRUE
-    END
-    GET(SELF.DataQ,SELF.CurrentRecord)
-    IF SELF.DataQ.TableNo = SELF.CurrentTable
-      RETURN FALSE
-    END
+  SELF.EnsureDataRange()
+  IF SELF.DataRangeCount < 1
+    SELF.CurrentRecord = 0
+    RETURN TRUE
   END
+  IF SELF.CurrentRecord < SELF.DataRangeFirst OR |
+      SELF.CurrentRecord >= SELF.DataRangeFirst + SELF.DataRangeCount
+    SELF.CurrentRecord = SELF.DataRangeFirst
+  ELSE
+    SELF.CurrentRecord += 1
+  END
+  IF SELF.CurrentRecord >= SELF.DataRangeFirst + SELF.DataRangeCount
+    SELF.CurrentRecord = 0
+    RETURN TRUE
+  END
+  GET(SELF.DataQ,SELF.CurrentRecord)
+  RETURN FALSE
+
+TpsParserType.GetCurrentRecordNumber PROCEDURE
+  CODE
+  IF SELF.CurrentRecord < 1 OR SELF.CurrentRecord > RECORDS(SELF.DataQ)
+    RETURN 0
+  END
+  GET(SELF.DataQ,SELF.CurrentRecord)
+  RETURN SELF.DataQ.RecordNumber
+
+TpsParserType.GetCurrentRecordOffset PROCEDURE
+  CODE
+  IF SELF.CurrentRecord < 1 OR SELF.CurrentRecord > RECORDS(SELF.DataQ)
+    RETURN 0
+  END
+  GET(SELF.DataQ,SELF.CurrentRecord)
+  RETURN SELF.DataQ.SourceOffset
+
+TpsParserType.GetRecoveryIssueCount PROCEDURE
+  CODE
+  RETURN SELF.RecoveryIssues
+
+TpsParserType.GetSourceEncrypted PROCEDURE
+  CODE
+  RETURN SELF.SourceEncrypted
 
 TpsParserType.Fields    PROCEDURE
   CODE
@@ -294,6 +353,14 @@ TpsParserType.GetFieldTypeByNumber  PROCEDURE(LONG pFieldNo)
   END
   GET(SELF.FieldQ,pFieldNo)
   RETURN CLIP(SELF.FieldQ.TypeName)
+
+TpsParserType.GetFieldTypeCodeByNumber PROCEDURE(LONG pFieldNo)
+  CODE
+  IF pFieldNo < 1 OR pFieldNo > RECORDS(SELF.FieldQ)
+    RETURN 0
+  END
+  GET(SELF.FieldQ,pFieldNo)
+  RETURN SELF.FieldQ.FieldType
 
 TpsParserType.GetFieldDimension PROCEDURE(STRING pFieldName)
   CODE
@@ -365,11 +432,209 @@ Matches                           LONG
     END
   END
   IF Matches > 1
-    Found = SELF.SetLastError(TpsErrFieldAmbiguous,'Ambiguous field, MEMO, or BLOB name "' & CLIP(pFieldName) & '" in table=' & SELF.CurrentTable)
+    Found = SELF.SetLastError(TpsErrFieldAmbiguous,'More than one field has that name. Details: name=' & CLIP(pFieldName) & ' table=' & SELF.CurrentTable)
     RETURN 0
   END
   IF Matches = 1
     RETURN Found
+  END
+  RETURN 0
+
+TpsParserType.GetFieldOffsetByNumber PROCEDURE(LONG pFieldNo)
+  CODE
+  IF pFieldNo < 1 OR pFieldNo > RECORDS(SELF.FieldQ)
+    RETURN 0
+  END
+  GET(SELF.FieldQ,pFieldNo)
+  RETURN SELF.FieldQ.Offset
+
+TpsParserType.GetFieldLengthByNumber PROCEDURE(LONG pFieldNo)
+  CODE
+  IF pFieldNo < 1 OR pFieldNo > RECORDS(SELF.FieldQ)
+    RETURN 0
+  END
+  GET(SELF.FieldQ,pFieldNo)
+  RETURN SELF.FieldQ.Length
+
+TpsParserType.GetFieldFlagsByNumber PROCEDURE(LONG pFieldNo)
+  CODE
+  IF pFieldNo < 1 OR pFieldNo > RECORDS(SELF.FieldQ)
+    RETURN 0
+  END
+  GET(SELF.FieldQ,pFieldNo)
+  RETURN SELF.FieldQ.Flags
+
+TpsParserType.GetFieldIndexByNumber PROCEDURE(LONG pFieldNo)
+  CODE
+  IF pFieldNo < 1 OR pFieldNo > RECORDS(SELF.FieldQ)
+    RETURN 0
+  END
+  GET(SELF.FieldQ,pFieldNo)
+  RETURN SELF.FieldQ.IndexNo
+
+TpsParserType.GetFieldStringMaskByNumber PROCEDURE(LONG pFieldNo)
+  CODE
+  IF pFieldNo < 1 OR pFieldNo > RECORDS(SELF.FieldQ)
+    RETURN ''
+  END
+  GET(SELF.FieldQ,pFieldNo)
+  IF SELF.FieldQ.StringMask &= NULL
+    RETURN ''
+  END
+  RETURN SELF.FieldQ.StringMask
+
+TpsParserType.GetFieldIsMemoByNumber PROCEDURE(LONG pFieldNo)
+  CODE
+  IF pFieldNo < 1 OR pFieldNo > RECORDS(SELF.FieldQ)
+    RETURN FALSE
+  END
+  GET(SELF.FieldQ,pFieldNo)
+  RETURN SELF.FieldQ.IsMemo
+
+TpsParserType.GetFieldIsBlobByNumber PROCEDURE(LONG pFieldNo)
+  CODE
+  IF pFieldNo < 1 OR pFieldNo > RECORDS(SELF.FieldQ)
+    RETURN FALSE
+  END
+  GET(SELF.FieldQ,pFieldNo)
+  RETURN SELF.FieldQ.IsBlob
+
+TpsParserType.GetMemoLengthByNumber PROCEDURE(LONG pFieldNo)
+  CODE
+  IF pFieldNo < 1 OR pFieldNo > RECORDS(SELF.FieldQ)
+    RETURN 0
+  END
+  GET(SELF.FieldQ,pFieldNo)
+  RETURN SELF.FieldQ.MemoLength
+
+TpsParserType.GetMemoFlagsByNumber PROCEDURE(LONG pFieldNo)
+  CODE
+  IF pFieldNo < 1 OR pFieldNo > RECORDS(SELF.FieldQ)
+    RETURN 0
+  END
+  GET(SELF.FieldQ,pFieldNo)
+  RETURN SELF.FieldQ.MemoFlags
+
+TpsParserType.GetExternalNameByNumber PROCEDURE(LONG pFieldNo)
+  CODE
+  IF pFieldNo < 1 OR pFieldNo > RECORDS(SELF.FieldQ)
+    RETURN ''
+  END
+  GET(SELF.FieldQ,pFieldNo)
+  IF SELF.FieldQ.ExternalName &= NULL
+    RETURN ''
+  END
+  RETURN SELF.FieldQ.ExternalName
+
+TpsParserType.Keys PROCEDURE
+I                     LONG
+Count                 LONG
+  CODE
+  Count = 0
+  LOOP I = 1 TO RECORDS(SELF.KeyQ)
+    GET(SELF.KeyQ,I)
+    IF SELF.KeyQ.TableNo = SELF.CurrentTable
+      Count += 1
+    END
+  END
+  RETURN Count
+
+TpsParserType.GetKeyName PROCEDURE(LONG pKeyNo)
+RecordIndex                LONG
+  CODE
+  RecordIndex = SELF.FindCurrentKeyRecord(pKeyNo)
+  IF RecordIndex = 0
+    RETURN ''
+  END
+  GET(SELF.KeyQ,RecordIndex)
+  IF SELF.KeyQ.Name &= NULL
+    RETURN ''
+  END
+  RETURN SELF.KeyQ.Name
+
+TpsParserType.GetKeyFlags PROCEDURE(LONG pKeyNo)
+RecordIndex                 LONG
+  CODE
+  RecordIndex = SELF.FindCurrentKeyRecord(pKeyNo)
+  IF RecordIndex = 0
+    RETURN 0
+  END
+  GET(SELF.KeyQ,RecordIndex)
+  RETURN SELF.KeyQ.Flags
+
+TpsParserType.GetKeyExternalName PROCEDURE(LONG pKeyNo)
+RecordIndex                        LONG
+  CODE
+  RecordIndex = SELF.FindCurrentKeyRecord(pKeyNo)
+  IF RecordIndex = 0
+    RETURN ''
+  END
+  GET(SELF.KeyQ,RecordIndex)
+  IF SELF.KeyQ.ExternalName &= NULL
+    RETURN ''
+  END
+  RETURN SELF.KeyQ.ExternalName
+
+TpsParserType.GetKeyFieldCount PROCEDURE(LONG pKeyNo)
+RecordIndex                      LONG
+  CODE
+  RecordIndex = SELF.FindCurrentKeyRecord(pKeyNo)
+  IF RecordIndex = 0
+    RETURN 0
+  END
+  GET(SELF.KeyQ,RecordIndex)
+  RETURN SELF.KeyQ.FieldCount
+
+TpsParserType.GetKeyFieldIndex PROCEDURE(LONG pKeyNo,LONG pRank)
+RecordIndex                      LONG
+  CODE
+  RecordIndex = SELF.FindCurrentKeyFieldRecord(pKeyNo,pRank)
+  IF RecordIndex = 0
+    RETURN 0
+  END
+  GET(SELF.KeyFieldQ,RecordIndex)
+  RETURN SELF.KeyFieldQ.FieldIndex
+
+TpsParserType.GetKeyFieldAscending PROCEDURE(LONG pKeyNo,LONG pRank)
+RecordIndex                          LONG
+  CODE
+  RecordIndex = SELF.FindCurrentKeyFieldRecord(pKeyNo,pRank)
+  IF RecordIndex = 0
+    RETURN FALSE
+  END
+  GET(SELF.KeyFieldQ,RecordIndex)
+  RETURN SELF.KeyFieldQ.Ascending
+
+TpsParserType.FindCurrentKeyRecord PROCEDURE(LONG pKeyNo)
+I                                    LONG
+Count                                LONG
+  CODE
+  IF pKeyNo < 1
+    RETURN 0
+  END
+  LOOP I = 1 TO RECORDS(SELF.KeyQ)
+    GET(SELF.KeyQ,I)
+    IF SELF.KeyQ.TableNo = SELF.CurrentTable
+      Count += 1
+      IF Count = pKeyNo
+        RETURN I
+      END
+    END
+  END
+  RETURN 0
+
+TpsParserType.FindCurrentKeyFieldRecord PROCEDURE(LONG pKeyNo,LONG pRank)
+I                                         LONG
+  CODE
+  IF pKeyNo < 1 OR pRank < 1
+    RETURN 0
+  END
+  LOOP I = 1 TO RECORDS(SELF.KeyFieldQ)
+    GET(SELF.KeyFieldQ,I)
+    IF SELF.KeyFieldQ.TableNo = SELF.CurrentTable AND |
+        SELF.KeyFieldQ.KeyNo = pKeyNo AND SELF.KeyFieldQ.Rank = pRank
+      RETURN I
+    END
   END
   RETURN 0
 
@@ -445,7 +710,7 @@ StrLen                                    LONG
       END
       StrLen = SELF.ReadByte(SELF.DataQ.Payload,Offset)
       IF StrLen > Length - 1
-        B = SELF.SetLastError(TpsErrFieldDataInvalid,'Invalid PSTRING length=' & StrLen & '; available=' & Length - 1)
+        B = SELF.SetLastError(TpsErrFieldDataInvalid,'A text field in this record has an impossible length. Details: length=' & StrLen & ' available=' & Length - 1)
         RETURN ''
       END
       IF StrLen = 0
@@ -742,6 +1007,57 @@ Result                                LONG
   pBlob{PROP:Touched} = TRUE
   RETURN SELF.SetLastError(0,'')
 
+TpsParserType.GetMemoStateByNumber PROCEDURE(LONG pFieldNo)
+Owner                                LONG
+MemoIndex                            LONG
+RawLen                               LONG
+First                                LONG
+Prefix                               STRING(TpsBlobLenPrefix)
+Copied                               LONG
+DeclaredLength                       LONG
+  CODE
+  Copied = SELF.SetLastError(0,'')
+  IF SELF.CurrentRecord < 1 OR SELF.CurrentRecord > RECORDS(SELF.DataQ) OR pFieldNo < 1 OR pFieldNo > RECORDS(SELF.FieldQ)
+    RETURN TpsMemoStateEmpty
+  END
+  GET(SELF.FieldQ,pFieldNo)
+  IF ~SELF.FieldQ.IsMemo AND ~SELF.FieldQ.IsBlob
+    RETURN TpsMemoStateEmpty
+  END
+  MemoIndex = SELF.FieldQ.MemoIndex
+  GET(SELF.DataQ,SELF.CurrentRecord)
+  Owner = SELF.DataQ.RecordNumber
+  First = SELF.FindFirstMemoChunk(Owner,MemoIndex)
+  IF First = 0
+    RETURN TpsMemoStateEmpty
+  END
+  IF ~SELF.MemoIsComplete(Owner,MemoIndex,RawLen)
+    Copied = SELF.SetLastError(TpsErrMemoDef,'Attached text or file data is incomplete.')
+    RETURN TpsMemoStateDamaged
+  END
+  GET(SELF.FieldQ,pFieldNo)
+  IF SELF.FieldQ.IsBlob
+    IF RawLen < TpsBlobLenPrefix
+      Copied = SELF.SetLastError(TpsErrBlobData,'The attached file is shorter than it claims. Details: raw=' & RawLen)
+      RETURN TpsMemoStateDamaged
+    END
+    Copied = SELF.CopyMemoRaw(Owner,MemoIndex,Prefix,TpsBlobLenPrefix)
+    IF Copied < TpsBlobLenPrefix
+      Copied = SELF.SetLastError(TpsErrBlobData,'The attached file is shorter than it claims. Details: copied=' & Copied & ' raw=' & RawLen)
+      RETURN TpsMemoStateDamaged
+    END
+    DeclaredLength = SELF.ReadLeLong(Prefix,0)
+    IF DeclaredLength < 0 OR DeclaredLength > RawLen - TpsBlobLenPrefix
+      Copied = SELF.SetLastError(TpsErrBlobData,'The attached file is a different size than it claims. Details: declared=' & DeclaredLength & ' raw=' & RawLen)
+      RETURN TpsMemoStateDamaged
+    END
+  END
+  RETURN TpsMemoStateComplete
+
+TpsParserType.GetBlobValueByNumber PROCEDURE(LONG pFieldNo,*LONG pBlobLength)
+  CODE
+  RETURN SELF.GetBlobPreviewByNumber(pFieldNo,7FFFFFFFH,pBlobLength)
+
 TpsParserType.GetBlobPreviewByNumber PROCEDURE(LONG pFieldNo,LONG pMaxBytes,*LONG pBlobLength)
 Result                                  LONG
   CODE
@@ -759,6 +1075,7 @@ BlobLen                               LONG
 Avail                                 LONG
 PreviewLen                            LONG
 CopyLen                               LONG
+First                                 LONG
 Raw                                   &STRING
   CODE
   pBlobLength = 0
@@ -766,15 +1083,26 @@ Raw                                   &STRING
     DISPOSE(SELF.BlobPreviewBuffer)
   END
   IF SELF.CurrentRecord < 1 OR SELF.CurrentRecord > RECORDS(SELF.DataQ) OR pFieldNo < 1 OR pFieldNo > RECORDS(SELF.FieldQ)
-    RETURN SELF.SetLastError(TpsErrBlobContext,'Invalid blob read context; current record=' & SELF.CurrentRecord & ' record queue count=' & RECORDS(SELF.DataQ) & ' field number=' & pFieldNo & ' field count=' & RECORDS(SELF.FieldQ))
+    RETURN SELF.SetLastError(TpsErrBlobContext,'The attached file could not be read in this context. Details: record=' & SELF.CurrentRecord & ' records=' & RECORDS(SELF.DataQ) & ' field=' & pFieldNo & ' fields=' & RECORDS(SELF.FieldQ))
   END
   GET(SELF.FieldQ,pFieldNo)
   IF ~SELF.FieldQ.IsBlob
-    RETURN SELF.SetLastError(TpsErrBlobFieldType,'Field is not a BLOB; field number=' & pFieldNo & ' name=' & CLIP(SELF.FieldQ.ShortName) & ' type=' & CLIP(SELF.FieldQ.TypeName))
+    RETURN SELF.SetLastError(TpsErrBlobFieldType,'That field does not hold an attached file. Details: field=' & pFieldNo & ' name=' & CLIP(SELF.FieldQ.ShortName) & ' type=' & CLIP(SELF.FieldQ.TypeName))
   END
   MemoIndex = SELF.FieldQ.MemoIndex
   GET(SELF.DataQ,SELF.CurrentRecord)
   Owner = SELF.DataQ.RecordNumber
+  First = SELF.FindFirstMemoChunk(Owner,MemoIndex)
+  IF First = 0
+    RETURN SELF.SetLastError(0,'')
+  END
+  GET(SELF.MemoQ,First)
+  IF SELF.MemoQ.Sequence = TpsDamagedMemoSequence
+    IF SELF.IgnoreErrors
+      RETURN SELF.SetLastError(0,'')
+    END
+    RETURN SELF.SetLastError(TpsErrBlobData,'Part of the attached file is damaged.')
+  END
   IF ~SELF.MemoIsComplete(Owner,MemoIndex,RawLen)
     RawLen = 0
   END
@@ -785,7 +1113,7 @@ Raw                                   &STRING
     IF SELF.IgnoreErrors
       RETURN SELF.SetLastError(0,'')
     END
-    RETURN SELF.SetLastError(TpsErrBlobData,'TPS BLOB is missing its four-byte length header')
+    RETURN SELF.SetLastError(TpsErrBlobData,'The attached file has no readable size.')
   END
   IF pMaxBytes < 0
     pMaxBytes = 0
@@ -796,7 +1124,7 @@ Raw                                   &STRING
   END
   Raw &= NEW(STRING(CopyLen))
   IF Raw &= NULL
-    RETURN SELF.SetLastError(TpsErrBlobData,'Could not allocate TPS BLOB preview buffer; byte count=' & CopyLen)
+    RETURN SELF.SetLastError(TpsErrBlobData,'There was not enough memory to read the attached file. Details: bytes=' & CopyLen)
   END
   CopyLen = SELF.CopyMemoRaw(Owner,MemoIndex,Raw,CopyLen)
   IF CopyLen < TpsBlobLenPrefix
@@ -804,7 +1132,7 @@ Raw                                   &STRING
     IF SELF.IgnoreErrors
       RETURN SELF.SetLastError(0,'')
     END
-    RETURN SELF.SetLastError(TpsErrBlobData,'TPS BLOB is missing its four-byte length header')
+    RETURN SELF.SetLastError(TpsErrBlobData,'The attached file has no readable size.')
   END
   BlobLen = SELF.ReadLeLong(Raw,0)
   Avail = RawLen - TpsBlobLenPrefix
@@ -813,7 +1141,7 @@ Raw                                   &STRING
       BlobLen = Avail
     ELSE
       DISPOSE(Raw)
-      RETURN SELF.SetLastError(TpsErrBlobData,'TPS BLOB declares ' & BlobLen & ' bytes but only ' & Avail & ' are available')
+      RETURN SELF.SetLastError(TpsErrBlobData,'The attached file is truncated. Details: declared=' & BlobLen & ' available=' & Avail)
     END
   END
   IF BlobLen < 0
@@ -821,7 +1149,7 @@ Raw                                   &STRING
       BlobLen = Avail
     ELSE
       DISPOSE(Raw)
-      RETURN SELF.SetLastError(TpsErrBlobData,'TPS BLOB declares negative length ' & BlobLen)
+      RETURN SELF.SetLastError(TpsErrBlobData,'The attached file has an impossible size. Details: declared=' & BlobLen)
     END
   END
   pBlobLength = BlobLen
@@ -833,7 +1161,7 @@ Raw                                   &STRING
     SELF.BlobPreviewBuffer &= NEW(STRING(PreviewLen))
     IF SELF.BlobPreviewBuffer &= NULL
       DISPOSE(Raw)
-      RETURN SELF.SetLastError(TpsErrBlobData,'Could not allocate TPS BLOB preview result; byte count=' & PreviewLen)
+      RETURN SELF.SetLastError(TpsErrBlobData,'There was not enough memory to read the attached file. Details: bytes=' & PreviewLen)
     END
     SELF.BlobPreviewBuffer = Raw[TpsBlobLenPrefix + 1 : TpsBlobLenPrefix + PreviewLen]
   END
@@ -850,9 +1178,14 @@ TpsParserType.Construct PROCEDURE
   CLEAR(SELF.SourceFileName)
   SELF.DataQ &= NEW(TpsDataQueue)
   SELF.MemoQ &= NEW(TpsMemoQueue)
+  SELF.DataRangeTable = -1
+  SELF.ParsedLayoutTable = -1
+  SELF.MemoQDirty = TRUE
   SELF.TableDefQ &= NEW(TpsTableDefQueue)
   SELF.TableNameQ &= NEW(TpsTableNameQueue)
   SELF.FieldQ &= NEW(TpsFieldQueue)
+  SELF.KeyQ &= NEW(TpsKeyQueue)
+  SELF.KeyFieldQ &= NEW(TpsKeyFieldQueue)
 
 TpsParserType.Destruct  PROCEDURE
   CODE
@@ -872,10 +1205,19 @@ TpsParserType.Destruct  PROCEDURE
   IF ~SELF.FieldQ &= NULL
     DISPOSE(SELF.FieldQ)
   END
+  IF ~SELF.KeyQ &= NULL
+    DISPOSE(SELF.KeyQ)
+  END
+  IF ~SELF.KeyFieldQ &= NULL
+    DISPOSE(SELF.KeyFieldQ)
+  END
 
 TpsParserType.RollbackData PROCEDURE(LONG pKeep)
 I                           LONG
   CODE
+  IF RECORDS(SELF.DataQ) > pKeep
+    SELF.InvalidateDataRange()
+  END
   LOOP I = RECORDS(SELF.DataQ) TO pKeep + 1 BY -1
     GET(SELF.DataQ,I)
     IF ~SELF.DataQ.Payload &= NULL
@@ -887,6 +1229,9 @@ I                           LONG
 TpsParserType.RollbackMemos PROCEDURE(LONG pKeep)
 I                            LONG
   CODE
+  IF RECORDS(SELF.MemoQ) > pKeep
+    SELF.MemoQDirty = TRUE
+  END
   LOOP I = RECORDS(SELF.MemoQ) TO pKeep + 1 BY -1
     GET(SELF.MemoQ,I)
     IF ~SELF.MemoQ.Payload &= NULL
@@ -936,6 +1281,7 @@ TpsParserType.FreeTableNames PROCEDURE
 TpsParserType.FreeFields PROCEDURE
 I                         LONG
   CODE
+  SELF.ParsedLayoutTable = -1
   LOOP I = RECORDS(SELF.FieldQ) TO 1 BY -1
     GET(SELF.FieldQ,I)
     IF ~SELF.FieldQ.Name &= NULL
@@ -944,8 +1290,29 @@ I                         LONG
     IF ~SELF.FieldQ.ShortName &= NULL
       DISPOSE(SELF.FieldQ.ShortName)
     END
+    IF ~SELF.FieldQ.StringMask &= NULL
+      DISPOSE(SELF.FieldQ.StringMask)
+    END
+    IF ~SELF.FieldQ.ExternalName &= NULL
+      DISPOSE(SELF.FieldQ.ExternalName)
+    END
     DELETE(SELF.FieldQ)
   END
+
+TpsParserType.FreeKeys PROCEDURE
+I                       LONG
+  CODE
+  LOOP I = RECORDS(SELF.KeyQ) TO 1 BY -1
+    GET(SELF.KeyQ,I)
+    IF ~SELF.KeyQ.Name &= NULL
+      DISPOSE(SELF.KeyQ.Name)
+    END
+    IF ~SELF.KeyQ.ExternalName &= NULL
+      DISPOSE(SELF.KeyQ.ExternalName)
+    END
+    DELETE(SELF.KeyQ)
+  END
+  FREE(SELF.KeyFieldQ)
 
 TpsParserType.SetReturnBuffer PROCEDURE(*STRING pData,LONG pPos,LONG pLen)
   CODE
@@ -1120,12 +1487,12 @@ Fetch                         LONG
   RawFile{PROP:Name} = RawName
   OPEN(RawFile,TpsDosReadMode)
   IF ERRORCODE()
-    RETURN SELF.SetLastError(TpsErrSourceOpen,'Could not open source file "' & CLIP(pFileName) & '", ERRORCODE=' & ERRORCODE())
+    RETURN SELF.SetLastError(TpsErrSourceOpen,'The file could not be opened. Details: ' & CLIP(pFileName) & ', ERRORCODE=' & ERRORCODE())
   END
   FileSize = BYTES(RawFile)
   IF FileSize <= 0
     CLOSE(RawFile)
-    RETURN SELF.SetLastError(TpsErrSourceEmpty,'Source file is empty: "' & CLIP(pFileName) & '"')
+    RETURN SELF.SetLastError(TpsErrSourceEmpty,'The file is empty. Details: ' & CLIP(pFileName))
   END
   SELF.SrcLen = FileSize
   IF ~SELF.Src &= NULL
@@ -1133,6 +1500,7 @@ Fetch                         LONG
   END
   SELF.Src &= NEW(STRING(FileSize))
   ReadOfs = 0
+  SELF.ReportProgress('Loading source',0,FileSize)
   LOOP WHILE ReadOfs < FileSize
     Fetch = SIZE(RAW:Buffer)
     IF Fetch > FileSize - ReadOfs
@@ -1141,10 +1509,11 @@ Fetch                         LONG
     GET(RawFile,ReadOfs + 1,Fetch)
     IF ERRORCODE()
       CLOSE(RawFile)
-      RETURN SELF.SetLastError(TpsErrSourceRead,'Could not read source file "' & CLIP(pFileName) & '" at offset=' & ReadOfs & ' length=' & Fetch & ', ERRORCODE=' & ERRORCODE())
+      RETURN SELF.SetLastError(TpsErrSourceRead,'The file could not be read to the end. Details: ' & CLIP(pFileName) & ' offset=' & ReadOfs & ' length=' & Fetch & ' ERRORCODE=' & ERRORCODE())
     END
     SELF.Src[ReadOfs + 1 : ReadOfs + Fetch] = RAW:Buffer[1 : Fetch]
     ReadOfs += Fetch
+    SELF.ReportProgress('Loading source',ReadOfs,FileSize)
   END
   CLOSE(RawFile)
   RETURN 0
@@ -1158,19 +1527,20 @@ Length                        LONG
 Result                        LONG
   CODE
   IF SELF.SrcLen < TpsHeaderDecryptLen
-    RETURN SELF.SetLastError(TpsErrDecryptTooShort,'Encrypted TPS is too short to decrypt header; bytes=' & SELF.SrcLen)
+    RETURN SELF.SetLastError(TpsErrDecryptTooShort,'The file is too short to be an encrypted TPS file. Details: bytes=' & SELF.SrcLen)
   END
+  SELF.ReportProgress('Decrypting source',0,SELF.SrcLen)
   CLEAR(Key)
   SELF.BuildOwnerKey(pOwner,Key)
   Result = SELF.DecryptRange(0,TpsHeaderDecryptLen,Key)
   IF Result <> 0
-    RETURN SELF.SetLastError(TpsErrDecryptHeaderRange,'Encrypted TPS decrypt failed at header; offset=0 length=' & TpsHeaderDecryptLen)
+    RETURN SELF.SetLastError(TpsErrDecryptHeaderRange,'Wrong owner password, or the header is damaged. Details: offset=0 length=' & TpsHeaderDecryptLen)
   END
   IF SELF.ReadLeLong(SELF.Src,0) <> 0
-    RETURN SELF.SetLastError(TpsErrDecryptHeaderMarker,'Encrypted TPS decrypt failed; bad owner/password or invalid header marker')
+    RETURN SELF.SetLastError(TpsErrDecryptHeaderMarker,'Wrong owner password, or this is not an encrypted TPS file. Details: header marker mismatch')
   END
   IF SELF.Slice(SELF.Src,TpsSignatureOffset,TpsSignatureLen) <> 'tOpS'
-    RETURN SELF.SetLastError(TpsErrDecryptSignature,'Encrypted TPS decrypt failed; bad owner/password or invalid signature=' & SELF.Slice(SELF.Src,TpsSignatureOffset,TpsSignatureLen))
+    RETURN SELF.SetLastError(TpsErrDecryptSignature,'Wrong owner password, or this is not an encrypted TPS file. Details: signature=' & SELF.Slice(SELF.Src,TpsSignatureOffset,TpsSignatureLen))
   END
   LOOP I = 0 TO ((TpsBlockEndTable - TpsBlockStartTable) / 4) - 1
     StartOfs = BSHIFT(SELF.ReadLeLong(SELF.Src,TpsBlockStartTable + (I * 4)),TpsBlockAddrShift) + TpsFirstPageOffset
@@ -1180,7 +1550,7 @@ Result                        LONG
         IF SELF.IgnoreErrors
           CYCLE
         END
-        RETURN SELF.SetLastError(TpsErrDecryptDataRange,'Invalid encrypted TPS block range; start=' & StartOfs & ' end=' & EndOfs & ' source bytes=' & SELF.SrcLen)
+        RETURN SELF.SetLastError(TpsErrDecryptDataRange,'The encrypted file is damaged. Details: block start=' & StartOfs & ' end=' & EndOfs & ' bytes=' & SELF.SrcLen)
       END
       Length = EndOfs - StartOfs
       IF Length > 0
@@ -1190,11 +1560,13 @@ Result                        LONG
             Result = SELF.SetLastError(0,'')
             CYCLE
           END
-          RETURN SELF.SetLastError(TpsErrDecryptDataRange,'Encrypted TPS decrypt failed; offset=' & StartOfs & ' length=' & Length)
+          RETURN SELF.SetLastError(TpsErrDecryptDataRange,'Wrong owner password, or the file is damaged. Details: offset=' & StartOfs & ' length=' & Length)
         END
       END
+      SELF.ReportProgress('Decrypting source',EndOfs,SELF.SrcLen)
     END
   END
+  SELF.ReportProgress('Decrypting source',SELF.SrcLen,SELF.SrcLen)
   RETURN 0
 
 TpsParserType.BuildOwnerKey PROCEDURE(STRING pOwner,*STRING pKey)
@@ -1240,10 +1612,10 @@ Pos                           LONG
 EndPos                        LONG
   CODE
   IF pOffset < 0 OR pLength < 0 OR pOffset + pLength > SELF.SrcLen
-    RETURN SELF.SetLastError(TpsErrDecryptRangeBounds,'Decrypt range is outside source; offset=' & pOffset & ' length=' & pLength & ' source bytes=' & SELF.SrcLen)
+    RETURN SELF.SetLastError(TpsErrDecryptRangeBounds,'The encrypted file is damaged. Details: range offset=' & pOffset & ' length=' & pLength & ' bytes=' & SELF.SrcLen)
   END
   IF BAND(pOffset,TpsKeySize - 1) <> 0 OR BAND(pLength,TpsKeySize - 1) <> 0
-    RETURN SELF.SetLastError(TpsErrDecryptRangeAlign,'Decrypt range is not 64-byte aligned; offset=' & pOffset & ' length=' & pLength)
+    RETURN SELF.SetLastError(TpsErrDecryptRangeAlign,'The encrypted file is damaged. Details: unaligned range offset=' & pOffset & ' length=' & pLength)
   END
   Pos = pOffset
   EndPos = pOffset + pLength
@@ -1273,7 +1645,7 @@ Data2                             LONG
     I -= 1
   END
 
-TpsParserType.ParseTps  PROCEDURE
+TpsParserType.ParseTps  PROCEDURE(BYTE pMetadataOnly)
 Result                    LONG
   CODE
   SELF.FreeData()
@@ -1286,18 +1658,28 @@ Result                    LONG
     RETURN Result
   END
   SELF.ParsePass = TpsPassMetadata
+  SELF.ReportProgress('Scanning definitions',0,SELF.SrcLen)
   Result = SELF.ParseAllBlocks()
   IF Result <> 0
     RETURN Result
   END
+  SELF.ReportProgress('Scanning definitions',SELF.SrcLen,SELF.SrcLen)
   IF SELF.Tables() = 0
-    RETURN SELF.SetLastError(TpsErrTableDefMissing,'No complete table definitions found')
+    IF ~SELF.AllowMissingDefinition()
+      RETURN SELF.SetLastError(TpsErrTableDefMissing,'This file no longer describes how its records are laid out.')
+    END
+  END
+  IF pMetadataOnly
+    SELF.ParsePass = 0
+    RETURN 0
   END
   SELF.ParsePass = TpsPassContent
+  SELF.ReportProgress('Scanning records and MEMO/BLOB data',0,SELF.SrcLen)
   Result = SELF.ParseAllBlocks()
   IF Result <> 0
     RETURN Result
   END
+  SELF.ReportProgress('Scanning records and MEMO/BLOB data',SELF.SrcLen,SELF.SrcLen)
   SELF.ParsePass = 0
   RETURN 0
 
@@ -1306,18 +1688,18 @@ HeaderSize                LONG
 TopSpeed                  STRING(TpsSignatureLen)
   CODE
   IF SELF.SrcLen < TpsMinHeaderLen
-    RETURN SELF.SetLastError(TpsErrHeaderTooShort,'Source is too short to be a TPS file; bytes=' & SELF.SrcLen)
+    RETURN SELF.SetLastError(TpsErrHeaderTooShort,'This file is too short to be a TPS file. Details: bytes=' & SELF.SrcLen)
   END
   IF SELF.ReadLeLong(SELF.Src,0) <> 0
-    RETURN SELF.SetLastError(TpsErrHeaderMarker,'Invalid TPS header marker at offset=0; value=' & SELF.ReadLeLong(SELF.Src,0))
+    RETURN SELF.SetLastError(TpsErrHeaderMarker,'This is not a TPS file, or it is password-protected. Details: header marker=' & SELF.ReadLeLong(SELF.Src,0))
   END
   HeaderSize = SELF.ReadLeShort(SELF.Src,4)
   IF HeaderSize < TpsMinHeaderLen OR HeaderSize > SELF.SrcLen
-    RETURN SELF.SetLastError(TpsErrHeaderSize,'Invalid TPS header size=' & HeaderSize & '; source bytes=' & SELF.SrcLen)
+    RETURN SELF.SetLastError(TpsErrHeaderSize,'This is not a TPS file, or it is password-protected. Details: header size=' & HeaderSize & ' bytes=' & SELF.SrcLen)
   END
   TopSpeed = SELF.Slice(SELF.Src,TpsSignatureOffset,TpsSignatureLen)
   IF TopSpeed <> 'tOpS'
-    RETURN SELF.SetLastError(TpsErrHeaderSignature,'Invalid TPS signature at offset=' & TpsSignatureOffset & '; value=' & TopSpeed)
+    RETURN SELF.SetLastError(TpsErrHeaderSignature,'This is not a TPS file. Details: signature=' & TopSpeed)
   END
   RETURN 0
 
@@ -1334,9 +1716,10 @@ Result                    LONG
     EndRef = SELF.ReadLeLong(SELF.Src,TpsBlockEndTable + (I * 4))
     IF StartRef < 0 OR EndRef < 0
       IF SELF.IgnoreErrors
+        SELF.RecoveryIssues += 1
         CYCLE
       END
-      RETURN SELF.SetLastError(TpsErrBlockRange,'Invalid negative TPS block reference; block=' & I)
+      RETURN SELF.SetLastError(TpsErrBlockRange,'The file structure is damaged. Details: negative block reference block=' & I)
     END
     StartOfs = BSHIFT(StartRef,TpsBlockAddrShift) + TpsFirstPageOffset
     EndOfs = BSHIFT(EndRef,TpsBlockAddrShift) + TpsFirstPageOffset
@@ -1345,9 +1728,10 @@ Result                    LONG
     END
     IF StartOfs < TpsFirstPageOffset OR EndOfs < StartOfs OR EndOfs > SELF.SrcLen
       IF SELF.IgnoreErrors
+        SELF.RecoveryIssues += 1
         CYCLE
       END
-      RETURN SELF.SetLastError(TpsErrBlockRange,'Invalid TPS block range; start=' & StartOfs & ' end=' & EndOfs & ' source bytes=' & SELF.SrcLen)
+      RETURN SELF.SetLastError(TpsErrBlockRange,'The file structure is damaged. Details: block start=' & StartOfs & ' end=' & EndOfs & ' bytes=' & SELF.SrcLen)
     END
     IF StartOfs < SELF.SrcLen
       Result = SELF.ParseBlock(StartOfs,EndOfs)
@@ -1363,18 +1747,21 @@ Pos                           LONG
 Addr                          LONG
 PageSize                      LONG
 Result                        LONG
+Stage                         STRING(64)
   CODE
   IF pStart < TpsFirstPageOffset OR pEnd < pStart OR pEnd > SELF.SrcLen
-    RETURN SELF.SetLastError(TpsErrBlockRange,'Invalid TPS block range; start=' & pStart & ' end=' & pEnd)
+    RETURN SELF.SetLastError(TpsErrBlockRange,'The file structure is damaged. Details: block start=' & pStart & ' end=' & pEnd)
   END
+  Stage = CHOOSE(SELF.ParsePass = TpsPassMetadata,'Scanning definitions','Scanning records and MEMO/BLOB data')
   Pos = pStart
   LOOP WHILE Pos < pEnd AND Pos <= pEnd - 6
     IF SELF.ReadLeLong(SELF.Src,Pos) = Pos
       PageSize = SELF.ReadLeShort(SELF.Src,Pos + 4)
       IF PageSize < TpsPageHeaderLen OR Pos + PageSize > pEnd OR Pos + PageSize > SELF.SrcLen
         IF ~SELF.IgnoreErrors
-          RETURN SELF.SetLastError(TpsErrPageInvalid,'Invalid TPS page size=' & PageSize & ' at offset=' & Pos)
+          RETURN SELF.SetLastError(TpsErrPageInvalid,'A page of the file is damaged. Details: page size=' & PageSize & ' at offset=' & Pos)
         END
+        SELF.RecoveryIssues += 1
         Pos += TpsPageScanStep
         CYCLE
       END
@@ -1385,6 +1772,7 @@ Result                        LONG
           IF ~SELF.IgnoreErrors
             RETURN SELF.GetErrorCode()
           END
+          SELF.RecoveryIssues += 1
           Result = SELF.SetLastError(0,'')
           Pos += TpsPageScanStep
         END
@@ -1404,21 +1792,30 @@ Result                        LONG
       END
       Pos += TpsPageScanStep
     END
+    SELF.ReportProgress(Stage,Pos,SELF.SrcLen)
   END
   RETURN 0
 
 TpsParserType.IsCompletePage    PROCEDURE(LONG pPos,LONG pPageSize,LONG pEnd)
 Ofs                               LONG
 Addr                              LONG
+NestedPos                         LONG
+NestedPageSize                    LONG
   CODE
   IF pPageSize < TpsPageHeaderLen OR pPos + pPageSize > pEnd OR pPos + pPageSize > SELF.SrcLen
     RETURN FALSE
   END
   Ofs = TpsPageScanStep
   LOOP WHILE Ofs < pPageSize AND pPos + Ofs <= pEnd - 4
-    Addr = SELF.ReadLeLong(SELF.Src,pPos + Ofs)
-    IF Addr = pPos + Ofs
-      RETURN FALSE
+    NestedPos = pPos + Ofs
+    Addr = SELF.ReadLeLong(SELF.Src,NestedPos)
+    IF Addr = NestedPos AND NestedPos <= pEnd - 6 AND NestedPos <= SELF.SrcLen - 6
+      NestedPageSize = SELF.ReadLeShort(SELF.Src,NestedPos + 4)
+      IF NestedPageSize >= TpsPageHeaderLen AND |
+          NestedPageSize <= pEnd - NestedPos AND |
+          NestedPageSize <= SELF.SrcLen - NestedPos
+        RETURN FALSE
+      END
     END
     Ofs += TpsPageScanStep
   END
@@ -1439,18 +1836,19 @@ Result                    LONG
   CODE
   PageSize = SELF.ReadLeShort(SELF.Src,pPos + 4)
   IF PageSize < TpsPageHeaderLen OR pPos + PageSize > pEnd OR pPos + PageSize > SELF.SrcLen
-    RETURN SELF.SetLastError(TpsErrPageInvalid,'Invalid TPS page size=' & PageSize & ' at offset=' & pPos)
+    RETURN SELF.SetLastError(TpsErrPageInvalid,'A page of the file is damaged. Details: page size=' & PageSize & ' at offset=' & pPos)
   END
   PageUncompressedSize = SELF.ReadLeShort(SELF.Src,pPos + 6)
   RecCount   = SELF.ReadLeShort(SELF.Src,pPos + 10)
   Flags      = SELF.ReadByte(SELF.Src,pPos + 12)
+  SELF.CurrentPageOffset = pPos
   IF Flags <> 0
     RETURN 0
   END
   CompressedStart = pPos + TpsPageHeaderLen
   CompressedLen   = PageSize - TpsPageHeaderLen
   IF SELF.BuildWorkPage(CompressedStart,CompressedLen,PageSize,PageUncompressedSize,Flags)
-    RETURN SELF.SetLastError(TpsErrRleInvalid,'Invalid TPS page compression at offset=' & pPos)
+    RETURN SELF.SetLastError(TpsErrRleInvalid,'A compressed page of the file is damaged. Details: offset=' & pPos)
   END
   KeepData = RECORDS(SELF.DataQ)
   KeepMemos = RECORDS(SELF.MemoQ)
@@ -1573,11 +1971,11 @@ Result                        LONG
   Prev &= NULL
   IF pRecordCount > 0
     IF pLen < 5
-      RETURN SELF.SetLastError(TpsErrRecordPageInvalid,'TPS page record stream is too short')
+      RETURN SELF.SetLastError(TpsErrRecordPageInvalid,'A page of the file is truncated.')
     END
     Flags = SELF.ReadByte(pData,0)
     IF BAND(Flags,TpsFlagRecLen + TpsFlagHeaderLen) <> TpsFlagRecLen + TpsFlagHeaderLen
-      RETURN SELF.SetLastError(TpsErrRecordPageInvalid,'First TPS record does not contain record and header lengths')
+      RETURN SELF.SetLastError(TpsErrRecordPageInvalid,'A page of the file is damaged. Details: first record has no length header')
     END
   END
   LOOP WHILE Pos < pLen - 1 AND Count < pRecordCount
@@ -1644,6 +2042,18 @@ Result                        LONG
     PrevHdr = HeaderLen
     Count += 1
   END
+  IF Count = pRecordCount AND Pos < pLen AND ~Prev &= NULL AND PrevLen >= 12 AND |
+      SELF.ReadByte(Prev,4) = TpsRecMemo AND RECORDS(SELF.MemoQ) > 0
+    GET(SELF.MemoQ,RECORDS(SELF.MemoQ))
+    IF SELF.MemoQ.TableNo = SELF.ReadBeLong(Prev,0) AND |
+        SELF.MemoQ.Owner = SELF.ReadBeLong(Prev,5) AND |
+        SELF.MemoQ.MemoIndex = SELF.ReadByte(Prev,9) AND |
+        SELF.MemoQ.Sequence = SELF.ReadBeShort(Prev,10)
+      SELF.MemoQ.Sequence = TpsDamagedMemoSequence
+      PUT(SELF.MemoQ)
+      SELF.MemoQDirty = TRUE
+    END
+  END
   IF ~Prev &= NULL
     DISPOSE(Prev)
   END
@@ -1651,7 +2061,7 @@ Result                        LONG
     IF Result = 0
       Result = TpsErrRecordPageInvalid
     END
-    RETURN SELF.SetLastError(Result,'TPS page declares ' & pRecordCount & ' records but ' & Count & ' were decoded')
+    RETURN SELF.SetLastError(Result,'A page holds fewer records than it claims. Details: declared=' & pRecordCount & ' decoded=' & Count)
   END
   RETURN 0
 
@@ -1665,16 +2075,17 @@ Seq                           LONG
 PayloadLen                    LONG
 BlockNo                       LONG
 NameLen                       LONG
+TotalLen                      LONG
 Payload                       &STRING
   CODE
   Payload &= NULL
   IF pHeaderLen < 1 OR pRecordLen < pHeaderLen
-    RETURN SELF.SetLastError(TpsErrRecordPageInvalid,'Invalid TPS record/header length')
+    RETURN SELF.SetLastError(TpsErrRecordPageInvalid,'A record in this file has an impossible length.')
   END
   IF SELF.ReadByte(pRecord,0) = TpsRecTableName
     IF SELF.ParsePass = TpsPassMetadata
       IF pRecordLen < pHeaderLen + 4
-        RETURN SELF.SetLastError(TpsErrRecordPageInvalid,'Invalid TPS table-name record')
+        RETURN SELF.SetLastError(TpsErrRecordPageInvalid,'A table name in this file is damaged.')
       END
       CLEAR(SELF.TableNameQ)
       SELF.TableNameQ.TableNo = SELF.ReadBeLong(pRecord,pHeaderLen)
@@ -1713,20 +2124,29 @@ Payload                       &STRING
       IF PayloadLen > 0
         Payload &= NEW(STRING(PayloadLen))
         Payload = pRecord[pHeaderLen + 1 : pRecordLen]
-        IF SELF.ValidateRecordPayload(TableNo,Payload,PayloadLen)
+        IF SELF.TableDefinitionIsComplete(TableNo,TotalLen)
+          IF SELF.ValidateRecordPayload(TableNo,Payload,PayloadLen)
+            DISPOSE(Payload)
+            RETURN SELF.GetErrorCode()
+          END
+        ELSIF ~SELF.AllowMissingDefinition()
           DISPOSE(Payload)
-          RETURN SELF.GetErrorCode()
+          RETURN SELF.SetLastError(TpsErrTableDefMissing,'No complete table definition for data table=' & TableNo)
         END
         CLEAR(SELF.DataQ)
         SELF.DataQ.TableNo = TableNo
         SELF.DataQ.RecordNumber = RecNo
         SELF.DataQ.PayloadLen = PayloadLen
         SELF.DataQ.Payload &= Payload
+        SELF.Arrival += 1
+        SELF.DataQ.SourceOffset = SELF.CurrentPageOffset
+        SELF.DataQ.Arrival = SELF.Arrival
         ADD(SELF.DataQ)
         IF ERRORCODE()
           DISPOSE(SELF.DataQ.Payload)
           RETURN SELF.SetLastError(ERRORCODE(),'Could not store TPS data record')
         END
+        SELF.InvalidateDataRange()
       END
     OF TpsRecMemo
       IF SELF.ParsePass <> TpsPassContent
@@ -1755,6 +2175,7 @@ Payload                       &STRING
           DISPOSE(SELF.MemoQ.Payload)
           RETURN SELF.SetLastError(ERRORCODE(),'Could not store TPS MEMO fragment')
         END
+        SELF.MemoQDirty = TRUE
       END
     OF TpsRecTableDef
       IF SELF.ParsePass <> TpsPassMetadata
@@ -1829,29 +2250,18 @@ Expected                          LONG
 Pos                               LONG
 TotalLen                          LONG
 Def                               &STRING
-DriverVer                         LONG
 RecordLen                         LONG
 NrFields                          LONG
 NrMemos                           LONG
 NrIndexes                         LONG
-FieldType                         LONG
-FieldName                         &STRING
-MemoName                          &STRING
-NameLen                           LONG
-ShortLen                          LONG
-ColonPos                          LONG
-Elements                          LONG
-FieldLen                          LONG
-FieldFlags                        LONG
-IndexNo                           LONG
-MemoLen                           LONG
-MemoFlags                         LONG
 Result                            LONG
   CODE
+  IF SELF.ParsedLayoutTable = SELF.CurrentTable AND RECORDS(SELF.FieldQ) > 0
+    RETURN 0
+  END
   Def &= NULL
-  FieldName &= NULL
-  MemoName &= NULL
   SELF.FreeFields()
+  SELF.FreeKeys()
   IF RECORDS(SELF.TableDefQ) = 0
     RETURN SELF.SetLastError(TpsErrTableDefMissing,'No table definitions found')
   END
@@ -1887,27 +2297,62 @@ Result                            LONG
       I += 1
     END
   END
-  Pos = 0
-  DriverVer = SELF.ReadLeShort(Def,Pos); Pos += 2
+  Pos = 2
   RecordLen = SELF.ReadLeShort(Def,Pos); Pos += 2
+  SELF.CurrentRecordLength = RecordLen
   NrFields  = SELF.ReadLeShort(Def,Pos); Pos += 2
   NrMemos   = SELF.ReadLeShort(Def,Pos); Pos += 2
   NrIndexes = SELF.ReadLeShort(Def,Pos); Pos += 2
-  LOOP I = 1 TO NrFields
-    IF Pos + 3 > TotalLen
-      DISPOSE(Def)
-      RETURN SELF.SetLastError(TpsErrFieldDefHeader,'Incomplete field definition header; table=' & SELF.CurrentTable & ' field=' & I & ' offset=' & Pos & ' total=' & TotalLen)
+  Result = SELF.ParseFieldDefinitions(Def,TotalLen,Pos,NrFields)
+  IF Result = 0
+    Result = SELF.ParseMemoDefinitions(Def,TotalLen,Pos,NrMemos,NrFields + 1)
+  END
+  IF Result = 0
+    Result = SELF.ParseKeyDefinitions(Def,TotalLen,Pos,NrIndexes)
+  END
+  DISPOSE(Def)
+  IF Result <> 0
+    SELF.FreeFields()
+    SELF.FreeKeys()
+    RETURN Result
+  END
+  IF RECORDS(SELF.FieldQ) = 0
+    SELF.FreeKeys()
+    RETURN SELF.SetLastError(TpsErrFieldDefMissing,'No fields found in table definition; table=' & SELF.CurrentTable)
+  END
+  SELF.ParsedLayoutTable = SELF.CurrentTable
+  RETURN 0
+
+TpsParserType.ParseFieldDefinitions PROCEDURE(*STRING pDefinition,LONG pTotalLen,*LONG pPosition,LONG pFieldCount)
+I                                 LONG
+Pos                               LONG
+FieldType                         LONG
+FieldName                         &STRING
+NameLen                           LONG
+ShortLen                          LONG
+Elements                          LONG
+FieldLen                          LONG
+FieldFlags                        LONG
+IndexNo                           LONG
+StringLen                         LONG
+Result                            LONG
+  CODE
+  Pos = pPosition
+  FieldName &= NULL
+  LOOP I = 1 TO pFieldCount
+    IF Pos + 3 > pTotalLen
+      SELF.FreeFields()
+      RETURN SELF.SetLastError(TpsErrFieldDefHeader,'Incomplete field definition header; table=' & SELF.CurrentTable & ' field=' & I & ' offset=' & Pos & ' total=' & pTotalLen)
     END
-    FieldType = SELF.ReadByte(Def,Pos); Pos += 1
+    FieldType = SELF.ReadByte(pDefinition,Pos); Pos += 1
     FieldName &= NULL
     CLEAR(SELF.FieldQ)
     SELF.FieldQ.TableNo = SELF.CurrentTable
     SELF.FieldQ.FieldNo = I
     SELF.FieldQ.FieldType = FieldType
-    SELF.FieldQ.Offset = SELF.ReadLeShort(Def,Pos); Pos += 2
-    NameLen = SELF.ReadZeroString(Def,TotalLen,Pos)
+    SELF.FieldQ.Offset = SELF.ReadLeShort(pDefinition,Pos); Pos += 2
+    NameLen = SELF.ReadZeroString(pDefinition,pTotalLen,Pos)
     IF NameLen < 0
-      DISPOSE(Def)
       SELF.FreeFields()
       RETURN SELF.SetLastError(TpsErrFieldDefBody,'Unterminated field name; table=' & SELF.CurrentTable & ' field=' & I)
     END
@@ -1918,10 +2363,9 @@ Result                            LONG
       FieldName &= NEW(STRING(1))
       CLEAR(FieldName)
     END
-    IF Pos + 8 > TotalLen
-      Result = SELF.SetLastError(TpsErrFieldDefBody,'Incomplete field definition body; table=' & SELF.CurrentTable & ' field=' & I & ' name=' & CLIP(FieldName) & ' offset=' & Pos & ' total=' & TotalLen)
+    IF Pos + 8 > pTotalLen
+      Result = SELF.SetLastError(TpsErrFieldDefBody,'Incomplete field definition body; table=' & SELF.CurrentTable & ' field=' & I & ' name=' & CLIP(FieldName) & ' offset=' & Pos & ' total=' & pTotalLen)
       DISPOSE(FieldName)
-      DISPOSE(Def)
       SELF.FreeFields()
       RETURN TpsErrFieldDefBody
     END
@@ -1934,10 +2378,10 @@ Result                            LONG
       SELF.FieldQ.ShortName &= NEW(STRING(1))
       CLEAR(SELF.FieldQ.ShortName)
     END
-    Elements = SELF.ReadLeShort(Def,Pos); Pos += 2
-    FieldLen = SELF.ReadLeShort(Def,Pos); Pos += 2
-    FieldFlags = SELF.ReadLeShort(Def,Pos); Pos += 2
-    IndexNo = SELF.ReadLeShort(Def,Pos); Pos += 2
+    Elements = SELF.ReadLeShort(pDefinition,Pos); Pos += 2
+    FieldLen = SELF.ReadLeShort(pDefinition,Pos); Pos += 2
+    FieldFlags = SELF.ReadLeShort(pDefinition,Pos); Pos += 2
+    IndexNo = SELF.ReadLeShort(pDefinition,Pos); Pos += 2
     IF Elements < 1 OR FieldLen < 1 OR FieldLen % Elements <> 0
       IF ~SELF.FieldQ.Name &= NULL
         DISPOSE(SELF.FieldQ.Name)
@@ -1945,12 +2389,13 @@ Result                            LONG
       IF ~SELF.FieldQ.ShortName &= NULL
         DISPOSE(SELF.FieldQ.ShortName)
       END
-      DISPOSE(Def)
       SELF.FreeFields()
       RETURN SELF.SetLastError(TpsErrFieldDataInvalid,'Invalid field dimensions; table=' & SELF.CurrentTable & ' field=' & I & ' elements=' & Elements & ' length=' & FieldLen)
     END
     SELF.FieldQ.Elements = Elements
     SELF.FieldQ.Length = FieldLen
+    SELF.FieldQ.Flags = FieldFlags
+    SELF.FieldQ.IndexNo = IndexNo
     CASE FieldType
       OF TpsFieldByte
         SELF.FieldQ.TypeName = 'BYTE'
@@ -1985,20 +2430,54 @@ Result                            LONG
     END
     CASE FieldType
       OF TpsFieldBcd
-        IF Pos + 2 > TotalLen
-          Result = SELF.SetLastError(TpsErrBcdMetadata,'Incomplete BCD metadata; table=' & SELF.CurrentTable & ' field=' & I & ' name=' & CLIP(FieldName) & ' offset=' & Pos & ' total=' & TotalLen)
+        IF Pos + 2 > pTotalLen
+          Result = SELF.SetLastError(TpsErrBcdMetadata,'Incomplete BCD metadata; table=' & SELF.CurrentTable & ' field=' & I & ' name=' & CLIP(FieldName) & ' offset=' & Pos & ' total=' & pTotalLen)
           IF ~SELF.FieldQ.Name &= NULL
             DISPOSE(SELF.FieldQ.Name)
           END
           IF ~SELF.FieldQ.ShortName &= NULL
             DISPOSE(SELF.FieldQ.ShortName)
           END
-          DISPOSE(Def)
           SELF.FreeFields()
           RETURN TpsErrBcdMetadata
         END
-        SELF.FieldQ.BcdDigitsAfterDecimal = SELF.ReadByte(Def,Pos); Pos += 1
-        SELF.FieldQ.BcdLengthOfElement = SELF.ReadByte(Def,Pos); Pos += 1
+        SELF.FieldQ.BcdDigitsAfterDecimal = SELF.ReadByte(pDefinition,Pos); Pos += 1
+        SELF.FieldQ.BcdLengthOfElement = SELF.ReadByte(pDefinition,Pos); Pos += 1
+    END
+    CASE FieldType
+      OF TpsFieldString OROF TpsFieldCString OROF TpsFieldPString
+        IF Pos + 2 > pTotalLen
+          Result = SELF.SetLastError(TpsErrStringMetadata,'Incomplete string metadata; table=' & SELF.CurrentTable & ' field=' & I & ' name=' & CLIP(FieldName) & ' offset=' & Pos & ' total=' & pTotalLen)
+          DISPOSE(SELF.FieldQ.Name)
+          DISPOSE(SELF.FieldQ.ShortName)
+          SELF.FreeFields()
+          RETURN TpsErrStringMetadata
+        END
+        StringLen = SELF.ReadLeShort(pDefinition,Pos); Pos += 2
+        SELF.FieldQ.StringLength = StringLen
+        NameLen = SELF.ReadZeroString(pDefinition,pTotalLen,Pos)
+        IF NameLen < 0
+          DISPOSE(SELF.FieldQ.Name)
+          DISPOSE(SELF.FieldQ.ShortName)
+          SELF.FreeFields()
+          RETURN SELF.SetLastError(TpsErrStringExternalName,'Unterminated string external name; table=' & SELF.CurrentTable & ' field=' & I)
+        END
+        IF NameLen > 0
+          SELF.FieldQ.StringMask &= NEW(STRING(NameLen))
+          SELF.FieldQ.StringMask = SELF.ReturnBuffer
+        END
+        IF NameLen = 0
+          IF Pos + 1 > pTotalLen
+            DISPOSE(SELF.FieldQ.Name)
+            DISPOSE(SELF.FieldQ.ShortName)
+            IF ~SELF.FieldQ.StringMask &= NULL
+              DISPOSE(SELF.FieldQ.StringMask)
+            END
+            SELF.FreeFields()
+            RETURN SELF.SetLastError(TpsErrStringExternalName,'Incomplete string external-name marker; table=' & SELF.CurrentTable & ' field=' & I & ' offset=' & Pos & ' total=' & pTotalLen)
+          END
+          Pos += 1
+        END
     END
     ADD(SELF.FieldQ)
     IF ERRORCODE()
@@ -2008,53 +2487,53 @@ Result                            LONG
       IF ~SELF.FieldQ.ShortName &= NULL
         DISPOSE(SELF.FieldQ.ShortName)
       END
-      DISPOSE(Def)
+      IF ~SELF.FieldQ.StringMask &= NULL
+        DISPOSE(SELF.FieldQ.StringMask)
+      END
       SELF.FreeFields()
       RETURN SELF.SetLastError(ERRORCODE(),'Could not store TPS field definition')
     END
-    CASE FieldType
-      OF TpsFieldString OROF TpsFieldCString OROF TpsFieldPString
-        IF Pos + 2 > TotalLen
-          Result = SELF.SetLastError(TpsErrStringMetadata,'Incomplete string metadata; table=' & SELF.CurrentTable & ' field=' & I & ' name=' & CLIP(FieldName) & ' offset=' & Pos & ' total=' & TotalLen)
-          DISPOSE(Def)
-          SELF.FreeFields()
-          RETURN TpsErrStringMetadata
-        END
-        Pos += 2
-        NameLen = SELF.ReadZeroString(Def,TotalLen,Pos)
-        IF NameLen < 0
-          DISPOSE(Def)
-          SELF.FreeFields()
-          RETURN SELF.SetLastError(TpsErrStringExternalName,'Unterminated string external name; table=' & SELF.CurrentTable & ' field=' & I)
-        END
-        IF NameLen = 0
-          IF Pos + 1 > TotalLen
-            DISPOSE(Def)
-            SELF.FreeFields()
-            RETURN SELF.SetLastError(TpsErrStringExternalName,'Incomplete string external-name marker; table=' & SELF.CurrentTable & ' field=' & I & ' offset=' & Pos & ' total=' & TotalLen)
-          END
-          Pos += 1
-        END
-    END
   END
-  LOOP I = 0 TO NrMemos - 1
-    NameLen = SELF.ReadZeroString(Def,TotalLen,Pos)
+  pPosition = Pos
+  RETURN 0
+
+TpsParserType.ParseMemoDefinitions PROCEDURE(*STRING pDefinition,LONG pTotalLen,*LONG pPosition,LONG pMemoCount,LONG pFirstFieldNo)
+I                                 LONG
+Pos                               LONG
+MemoName                          &STRING
+ExternalName                      &STRING
+NameLen                           LONG
+ShortLen                          LONG
+MemoLen                           LONG
+MemoFlags                         LONG
+Result                            LONG
+  CODE
+  Pos = pPosition
+  MemoName &= NULL
+  ExternalName &= NULL
+  LOOP I = 0 TO pMemoCount - 1
+    NameLen = SELF.ReadZeroString(pDefinition,pTotalLen,Pos)
     IF NameLen < 0
-      DISPOSE(Def)
       SELF.FreeFields()
       RETURN SELF.SetLastError(TpsErrMemoExternalName,'Unterminated MEMO external name; table=' & SELF.CurrentTable & ' memo=' & I)
     END
+    ExternalName &= NULL
+    IF NameLen > 0
+      ExternalName &= NEW(STRING(NameLen))
+      ExternalName = SELF.ReturnBuffer
+    END
     IF NameLen = 0
-      IF Pos + 1 > TotalLen
-        DISPOSE(Def)
+      IF Pos + 1 > pTotalLen
         SELF.FreeFields()
-        RETURN SELF.SetLastError(TpsErrMemoExternalName,'Incomplete memo external-name marker; table=' & SELF.CurrentTable & ' memo=' & I & ' offset=' & Pos & ' total=' & TotalLen)
+        RETURN SELF.SetLastError(TpsErrMemoExternalName,'Incomplete memo external-name marker; table=' & SELF.CurrentTable & ' memo=' & I & ' offset=' & Pos & ' total=' & pTotalLen)
       END
       Pos += 1
     END
-    NameLen = SELF.ReadZeroString(Def,TotalLen,Pos)
+    NameLen = SELF.ReadZeroString(pDefinition,pTotalLen,Pos)
     IF NameLen < 0
-      DISPOSE(Def)
+      IF ~ExternalName &= NULL
+        DISPOSE(ExternalName)
+      END
       SELF.FreeFields()
       RETURN SELF.SetLastError(TpsErrMemoDef,'Unterminated MEMO name; table=' & SELF.CurrentTable & ' memo=' & I)
     END
@@ -2065,18 +2544,20 @@ Result                            LONG
       MemoName &= NEW(STRING(1))
       CLEAR(MemoName)
     END
-    IF Pos + 4 > TotalLen
-      Result = SELF.SetLastError(TpsErrMemoDef,'Incomplete memo definition; table=' & SELF.CurrentTable & ' memo=' & I & ' name=' & CLIP(MemoName) & ' offset=' & Pos & ' total=' & TotalLen)
+    IF Pos + 4 > pTotalLen
+      Result = SELF.SetLastError(TpsErrMemoDef,'Incomplete memo definition; table=' & SELF.CurrentTable & ' memo=' & I & ' name=' & CLIP(MemoName) & ' offset=' & Pos & ' total=' & pTotalLen)
       DISPOSE(MemoName)
-      DISPOSE(Def)
+      IF ~ExternalName &= NULL
+        DISPOSE(ExternalName)
+      END
       SELF.FreeFields()
       RETURN TpsErrMemoDef
     END
-    MemoLen = SELF.ReadLeShort(Def,Pos); Pos += 2
-    MemoFlags = SELF.ReadLeShort(Def,Pos); Pos += 2
+    MemoLen = SELF.ReadLeShort(pDefinition,Pos); Pos += 2
+    MemoFlags = SELF.ReadLeShort(pDefinition,Pos); Pos += 2
     CLEAR(SELF.FieldQ)
     SELF.FieldQ.TableNo = SELF.CurrentTable
-    SELF.FieldQ.FieldNo = NrFields + I + 1
+    SELF.FieldQ.FieldNo = pFirstFieldNo + I
     SELF.FieldQ.Name &= MemoName
     ShortLen = LEN(SELF.StripTablePrefix(MemoName))
     IF ShortLen > 0
@@ -2088,6 +2569,9 @@ Result                            LONG
     END
     SELF.FieldQ.FieldType = TpsMemoFieldType
     SELF.FieldQ.MemoIndex = I
+    SELF.FieldQ.MemoLength = MemoLen
+    SELF.FieldQ.MemoFlags = MemoFlags
+    SELF.FieldQ.ExternalName &= ExternalName
     SELF.FieldQ.IsMemo = CHOOSE(BAND(MemoFlags,TpsBlobFlag) = 0,1,0)
     SELF.FieldQ.IsBlob = CHOOSE(BAND(MemoFlags,TpsBlobFlag) <> 0,1,0)
     SELF.FieldQ.TypeName = CHOOSE(SELF.FieldQ.IsBlob,'BLOB','MEMO')
@@ -2099,15 +2583,117 @@ Result                            LONG
       IF ~SELF.FieldQ.ShortName &= NULL
         DISPOSE(SELF.FieldQ.ShortName)
       END
-      DISPOSE(Def)
+      IF ~SELF.FieldQ.ExternalName &= NULL
+        DISPOSE(SELF.FieldQ.ExternalName)
+      END
       SELF.FreeFields()
       RETURN SELF.SetLastError(ERRORCODE(),'Could not store TPS MEMO definition')
     END
   END
-  DISPOSE(Def)
-  IF RECORDS(SELF.FieldQ) = 0
-    RETURN SELF.SetLastError(TpsErrFieldDefMissing,'No fields found in table definition; table=' & SELF.CurrentTable)
+  pPosition = Pos
+  RETURN 0
+
+TpsParserType.ParseKeyDefinitions PROCEDURE(*STRING pDefinition,LONG pTotalLen,*LONG pPosition,LONG pKeyCount)
+I                                 LONG
+J                                 LONG
+Pos                               LONG
+KeyName                           &STRING
+ExternalName                      &STRING
+NameLen                           LONG
+KeyFlags                          LONG
+KeyFieldCount                     LONG
+KeyFieldIndex                     LONG
+KeyFieldFlags                     LONG
+  CODE
+  Pos = pPosition
+  KeyName &= NULL
+  ExternalName &= NULL
+  LOOP I = 1 TO pKeyCount
+    NameLen = SELF.ReadZeroString(pDefinition,pTotalLen,Pos)
+    IF NameLen < 0
+      SELF.FreeFields()
+      SELF.FreeKeys()
+      RETURN SELF.SetLastError(TpsErrIndexDef,'Unterminated index external name; table=' & SELF.CurrentTable & ' key=' & I)
+    END
+    ExternalName &= NULL
+    IF NameLen > 0
+      ExternalName &= NEW(STRING(NameLen))
+      ExternalName = SELF.ReturnBuffer
+    ELSE
+      IF Pos + 1 > pTotalLen OR SELF.ReadByte(pDefinition,Pos) <> 1
+        SELF.FreeFields()
+        SELF.FreeKeys()
+        RETURN SELF.SetLastError(TpsErrIndexDef,'Invalid index external-name marker; table=' & SELF.CurrentTable & ' key=' & I)
+      END
+      Pos += 1
+    END
+    NameLen = SELF.ReadZeroString(pDefinition,pTotalLen,Pos)
+    IF NameLen < 0
+      IF ~ExternalName &= NULL
+        DISPOSE(ExternalName)
+      END
+      SELF.FreeFields()
+      SELF.FreeKeys()
+      RETURN SELF.SetLastError(TpsErrIndexDef,'Unterminated index name; table=' & SELF.CurrentTable & ' key=' & I)
+    END
+    KeyName &= NEW(STRING(CHOOSE(NameLen > 0,NameLen,1)))
+    IF NameLen > 0
+      KeyName = SELF.ReturnBuffer
+    ELSE
+      CLEAR(KeyName)
+    END
+    IF Pos + 3 > pTotalLen
+      DISPOSE(KeyName)
+      IF ~ExternalName &= NULL
+        DISPOSE(ExternalName)
+      END
+      SELF.FreeFields()
+      SELF.FreeKeys()
+      RETURN SELF.SetLastError(TpsErrIndexDef,'Incomplete index definition; table=' & SELF.CurrentTable & ' key=' & I)
+    END
+    KeyFlags = SELF.ReadByte(pDefinition,Pos); Pos += 1
+    KeyFieldCount = SELF.ReadLeShort(pDefinition,Pos); Pos += 2
+    CLEAR(SELF.KeyQ)
+    SELF.KeyQ.TableNo = SELF.CurrentTable
+    SELF.KeyQ.KeyNo = I
+    SELF.KeyQ.Name &= KeyName
+    SELF.KeyQ.ExternalName &= ExternalName
+    SELF.KeyQ.Flags = KeyFlags
+    SELF.KeyQ.FieldCount = KeyFieldCount
+    ADD(SELF.KeyQ)
+    IF ERRORCODE()
+      DISPOSE(KeyName)
+      IF ~ExternalName &= NULL
+        DISPOSE(ExternalName)
+      END
+      SELF.FreeFields()
+      SELF.FreeKeys()
+      RETURN SELF.SetLastError(ERRORCODE(),'Could not store TPS index definition')
+    END
+    LOOP J = 1 TO KeyFieldCount
+      IF Pos + 4 > pTotalLen
+        SELF.FreeFields()
+        SELF.FreeKeys()
+        RETURN SELF.SetLastError(TpsErrIndexDef,'Incomplete index component; table=' & SELF.CurrentTable & ' key=' & I & ' rank=' & J)
+      END
+      KeyFieldIndex = SELF.ReadLeShort(pDefinition,Pos); Pos += 2
+      KeyFieldFlags = SELF.ReadLeShort(pDefinition,Pos); Pos += 2
+      CLEAR(SELF.KeyFieldQ)
+      SELF.KeyFieldQ.TableNo = SELF.CurrentTable
+      SELF.KeyFieldQ.KeyNo = I
+      SELF.KeyFieldQ.Rank = J
+      SELF.KeyFieldQ.FieldIndex = KeyFieldIndex
+      SELF.KeyFieldQ.Flags = KeyFieldFlags
+      SELF.KeyFieldQ.Ascending = CHOOSE(BAND(KeyFieldFlags,TpsKeyFieldDescendingFlag) = 0,TRUE,FALSE)
+      ADD(SELF.KeyFieldQ)
+      IF ERRORCODE()
+        SELF.FreeFields()
+        SELF.FreeKeys()
+        RETURN SELF.SetLastError(ERRORCODE(),'Could not store TPS index component')
+      END
+    END
   END
+  pPosition = Pos
   RETURN 0
 
 TpsParserType.ValidateRecordPayload PROCEDURE(LONG pTableNo,*STRING pData,LONG pLen)
@@ -2131,9 +2717,11 @@ B                                    LONG
 Result                               LONG
   CODE
   SELF.CurrentTable = pTableNo
-  Result = SELF.ParseTableLayout()
-  IF Result <> 0
-    RETURN Result
+  IF SELF.ParsedLayoutTable <> pTableNo
+    Result = SELF.ParseTableLayout()
+    IF Result <> 0
+      RETURN Result
+    END
   END
   LOOP I = 1 TO RECORDS(SELF.FieldQ)
     GET(SELF.FieldQ,I)
@@ -2308,6 +2896,45 @@ ElementLen                        LONG
   END
   RETURN FALSE
 
+TpsParserType.EnsureDataRange PROCEDURE
+I                               LONG
+  CODE
+  IF SELF.DataRangeTable = SELF.CurrentTable
+    RETURN
+  END
+  SELF.DataRangeTable = SELF.CurrentTable
+  SELF.DataRangeFirst = 0
+  SELF.DataRangeCount = 0
+  LOOP I = 1 TO RECORDS(SELF.DataQ)
+    GET(SELF.DataQ,I)
+    IF SELF.DataQ.TableNo = SELF.CurrentTable
+      IF SELF.DataRangeFirst = 0
+        SELF.DataRangeFirst = I
+      END
+      SELF.DataRangeCount += 1
+    ELSIF SELF.DataRangeFirst > 0
+      BREAK
+    END
+  END
+  IF SELF.CurrentRecord < SELF.DataRangeFirst OR |
+      SELF.CurrentRecord >= SELF.DataRangeFirst + SELF.DataRangeCount
+    SELF.CurrentRecord = 0
+  END
+
+TpsParserType.InvalidateDataRange PROCEDURE
+  CODE
+  SELF.DataRangeTable = -1
+  SELF.DataRangeFirst = 0
+  SELF.DataRangeCount = 0
+
+TpsParserType.EnsureMemoQSorted PROCEDURE
+  CODE
+  IF ~SELF.MemoQDirty
+    RETURN
+  END
+  SORT(SELF.MemoQ,+SELF.MemoQ.TableNo,+SELF.MemoQ.Owner,+SELF.MemoQ.MemoIndex,+SELF.MemoQ.Sequence,+SELF.MemoQ.Arrival)
+  SELF.MemoQDirty = FALSE
+
 TpsParserType.CompareMemoKey    PROCEDURE(LONG pIndex,LONG pOwner,LONG pMemoIndex)
   CODE
   GET(SELF.MemoQ,pIndex)
@@ -2338,6 +2965,7 @@ Mid                                   LONG
 Cmp                                   LONG
 Found                                 LONG
   CODE
+  SELF.EnsureMemoQSorted()
   First = 1
   Last = RECORDS(SELF.MemoQ)
   Found = 0
@@ -2355,13 +2983,6 @@ Found                                 LONG
   END
   RETURN Found
 
-TpsParserType.MemoRawLength PROCEDURE(LONG pOwner,LONG pMemoIndex)
-RawLen                        LONG
-Complete                      BYTE
-  CODE
-  Complete = SELF.MemoIsComplete(pOwner,pMemoIndex,RawLen)
-  RETURN RawLen
-
 TpsParserType.MemoIsComplete PROCEDURE(LONG pOwner,LONG pMemoIndex,*LONG pRawLen)
 I                              LONG
 J                              LONG
@@ -2370,7 +2991,6 @@ Expected                       LONG
 Found                          BYTE
   CODE
   pRawLen = 0
-  SORT(SELF.MemoQ,+SELF.MemoQ.TableNo,+SELF.MemoQ.Owner,+SELF.MemoQ.MemoIndex,+SELF.MemoQ.Sequence,+SELF.MemoQ.Arrival)
   I = SELF.FindFirstMemoChunk(pOwner,pMemoIndex)
   LOOP WHILE I > 0 AND I <= RECORDS(SELF.MemoQ)
     GET(SELF.MemoQ,I)
