@@ -16,6 +16,7 @@ RegressionTpsParserType CLASS(TpsParserType),TYPE
 BlobPreviewByNumber PROCEDURE(LONG pFieldNo,LONG pMaxBytes,*LONG pBlobLength),STRING
 SelectRawTableNumber PROCEDURE(LONG pTableNo),LONG
 BuildFragmentedBlobFixture PROCEDURE,LONG
+BuildInvalidMemoFixture PROCEDURE,LONG
                        END
 
 MetadataProgressProbeType CLASS(TpsProgressSinkType),TYPE
@@ -42,6 +43,7 @@ CorruptFixtureRoot STRING(260)
 CorruptCountPath STRING(260)
 CorruptRlePath   STRING(260)
 CorruptPagePath  STRING(260)
+CorruptBlockRangePath STRING(260)
 CorruptBlobPath  STRING(260)
 CorruptBlobNegativePath STRING(260)
 CorruptBlobMissingPath STRING(260)
@@ -84,12 +86,14 @@ Id                   LONG
   CorruptCountPath = CLIP(CorruptFixtureRoot) & '\CorruptCount.tmp'
   CorruptRlePath = CLIP(CorruptFixtureRoot) & '\CorruptRle.tmp'
   CorruptPagePath = CLIP(CorruptFixtureRoot) & '\CorruptPage.tmp'
+  CorruptBlockRangePath = CLIP(CorruptFixtureRoot) & '\CorruptBlockRange.tmp'
   CorruptBlobPath = CLIP(CorruptFixtureRoot) & '\CorruptBlob.tmp'
   CorruptBlobNegativePath = CLIP(CorruptFixtureRoot) & '\CorruptBlobNegative.tmp'
   CorruptBlobMissingPath = CLIP(CorruptFixtureRoot) & '\CorruptBlobMissing.tmp'
   RequireLong(CHOOSE(EXISTS(CLIP(CorruptCountPath)),TRUE,FALSE),TRUE,321)
   RequireLong(CHOOSE(EXISTS(CLIP(CorruptRlePath)),TRUE,FALSE),TRUE,322)
   RequireLong(CHOOSE(EXISTS(CLIP(CorruptPagePath)),TRUE,FALSE),TRUE,323)
+  RequireLong(CHOOSE(EXISTS(CLIP(CorruptBlockRangePath)),TRUE,FALSE),TRUE,327)
   RequireLong(CHOOSE(EXISTS(CLIP(CorruptBlobPath)),TRUE,FALSE),TRUE,324)
   RequireLong(CHOOSE(EXISTS(CLIP(CorruptBlobNegativePath)),TRUE,FALSE),TRUE,325)
   RequireLong(CHOOSE(EXISTS(CLIP(CorruptBlobMissingPath)),TRUE,FALSE),TRUE,326)
@@ -218,6 +222,15 @@ Id                   LONG
   RequireString(FragmentedBlob,'ABCDEF',261)
   Parser.Kill()
 
+  Result = Parser.BuildInvalidMemoFixture()
+  RequireLong(Result,0,382)
+  RequireLong(Parser.Get(1),0,383)
+  RequireLong(Parser.GetMemoStateByNumber(1),TpsMemoStateDamaged,384)
+  FragmentedBlob = Parser.GetBlobValueByNumber(1,BlobLength)
+  RequireLong(BlobLength,0,385)
+  RequireLong(Parser.GetErrorCode(),TpsErrBlobData,386)
+  Parser.Kill()
+
   Result = Parser.Init('tests\fixtures\SUPERFILE.TPS')
   RequireLong(Result,0,230)
   RequireLong(Parser.Tables(),2,231)
@@ -308,6 +321,14 @@ Id                   LONG
   Result = Parser.Init(CorruptCountPath,'',TRUE)
   RequireLong(Result,0,151)
   RequirePositive(Parser.Records(),1,152)
+  Parser.Kill()
+
+  Result = Parser.Init(CorruptBlockRangePath)
+  RequireLong(Result,TpsErrBlockRange,387)
+  Result = Parser.InitRecovering(CorruptBlockRangePath)
+  RequireLong(Result,0,388)
+  RequireLong(Parser.GetRecoveryIssueCount(),1,389)
+  RequireLong(Parser.Records(),2,390)
   Parser.Kill()
 
   Result = Parser.Init(CorruptRlePath)
@@ -509,6 +530,24 @@ RegressionTpsParserType.BuildFragmentedBlobFixture PROCEDURE
   END
   SELF.CurrentTable = 1
   RETURN SELF.Set(0)
+
+RegressionTpsParserType.BuildInvalidMemoFixture PROCEDURE
+InvalidMemoIndex                                   LONG
+InvalidMemoResult                                  LONG
+  CODE
+  InvalidMemoResult = SELF.BuildFragmentedBlobFixture()
+  IF InvalidMemoResult <> 0
+    RETURN InvalidMemoResult
+  END
+  LOOP InvalidMemoIndex = 1 TO RECORDS(SELF.MemoQ)
+    GET(SELF.MemoQ,InvalidMemoIndex)
+    IF SELF.MemoQ.Sequence = 2
+      SELF.MemoQ.DataLen = SIZE(SELF.MemoQ.Payload) + 1
+      PUT(SELF.MemoQ)
+      RETURN 0
+    END
+  END
+  RETURN 1
 
 RequireLong PROCEDURE(LONG pActual,LONG pExpected,LONG pCode)
   CODE

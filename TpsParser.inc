@@ -48,6 +48,26 @@ Payload               &STRING
 Arrival               LONG
                     END
 
+TpsMemoChainQueue   QUEUE,TYPE
+TableNo               LONG
+Owner                 LONG
+MemoIndex             LONG
+State                 BYTE
+RawLen                LONG
+PartFirst             LONG
+PartCount             LONG
+                    END
+
+TpsMemoPartQueue    QUEUE,TYPE
+MemoQIndex            LONG
+                    END
+
+TpsBlockRangeQueue  QUEUE,TYPE
+BlockNo               LONG
+StartOfs              LONG
+EndOfs                LONG
+                    END
+
 TpsTableDefQueue    QUEUE,TYPE
 TableNo               LONG
 BlockNo               LONG
@@ -240,9 +260,13 @@ DataRangeTable        LONG,PRIVATE
 DataRangeFirst        LONG,PRIVATE
 DataRangeCount        LONG,PRIVATE
 MemoQDirty            BYTE,PRIVATE
+BlockRangesReady      BYTE,PRIVATE
 ParsedLayoutTable     LONG,PRIVATE
 DataQ                 &TpsDataQueue,PROTECTED
 MemoQ                 &TpsMemoQueue,PROTECTED
+MemoChainQ            &TpsMemoChainQueue,PRIVATE
+MemoPartQ             &TpsMemoPartQueue,PRIVATE
+BlockRangeQ           &TpsBlockRangeQueue,PRIVATE
 TableDefQ             &TpsTableDefQueue,PROTECTED
 TableNameQ            &TpsTableNameQueue,PROTECTED
 FieldQ                &TpsFieldQueue,PROTECTED
@@ -262,6 +286,7 @@ ShuffleKey            PROCEDURE(*STRING pKey),PRIVATE
 DecryptRange          PROCEDURE(LONG pOffset,LONG pLength,*STRING pKey),LONG,PRIVATE
 DecryptBlock64        PROCEDURE(LONG pOffset,*STRING pKey),PRIVATE
 ParseTps              PROCEDURE(BYTE pMetadataOnly),LONG,PRIVATE
+BuildBlockRangeCache  PROCEDURE,LONG,PRIVATE
 ParseAllBlocks        PROCEDURE,LONG,PRIVATE
 ParseBlock            PROCEDURE(LONG pStart,LONG pEnd),LONG,PRIVATE
 IsCompletePage        PROCEDURE(LONG pPos,LONG pPageSize,LONG pEnd),BYTE,PRIVATE
@@ -284,8 +309,10 @@ InvalidateDataRange   PROCEDURE,PRIVATE
 EnsureMemoQSorted     PROCEDURE,PRIVATE
 CompareMemoKey        PROCEDURE(LONG pIndex,LONG pOwner,LONG pMemoIndex),LONG,PRIVATE
 FindFirstMemoChunk    PROCEDURE(LONG pOwner,LONG pMemoIndex),LONG,PRIVATE
-CopyMemoRaw           PROCEDURE(LONG pOwner,LONG pMemoIndex,*STRING pRaw,LONG pMaxLen),LONG,PRIVATE
-MemoIsComplete        PROCEDURE(LONG pOwner,LONG pMemoIndex,*LONG pRawLen),BYTE,PRIVATE
+FindMemoChainCache    PROCEDURE(LONG pOwner,LONG pMemoIndex),LONG,PRIVATE
+ResolveMemoChain      PROCEDURE(LONG pOwner,LONG pMemoIndex,*LONG pRawLen,*LONG pCacheIndex),BYTE,PRIVATE
+CopyResolvedMemo      PROCEDURE(LONG pCacheIndex,*STRING pRaw,LONG pMaxLen),LONG,PRIVATE
+InvalidateMemoChainCache PROCEDURE,PRIVATE
 FindCurrentKeyRecord  PROCEDURE(LONG pKeyNo),LONG,PRIVATE
 FindCurrentKeyFieldRecord PROCEDURE(LONG pKeyNo,LONG pRank),LONG,PRIVATE
 LoadBlobPreviewByNumber PROCEDURE(LONG pFieldNo,LONG pMaxBytes,*LONG pBlobLength),LONG,PRIVATE

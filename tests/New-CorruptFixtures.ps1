@@ -17,6 +17,8 @@ if ([BitConverter]::ToUInt16($sourceBytes, 7940) -ne 3124 -or
     [BitConverter]::ToUInt16($sourceBytes, 7942) -ne 3124 -or
     [BitConverter]::ToUInt16($sourceBytes, 7946) -ne 12 -or
     $sourceBytes[7948] -ne 0 -or
+    [BitConverter]::ToInt32($sourceBytes, 0x20) -ne 0 -or
+    [BitConverter]::ToInt32($sourceBytes, 0x110) -ne 0 -or
     [BitConverter]::ToUInt16($sourceBytes, 49412) -ne 10504 -or
     [BitConverter]::ToUInt16($sourceBytes, 49418) -ne 2 -or
     [BitConverter]::ToUInt16($sourceBytes, 49663) -ne 10256 -or
@@ -56,6 +58,13 @@ Write-CorruptFixture -Name "CorruptPage.tmp" -Mutate {
     param([byte[]]$bytes)
     $bytes[49412] = 12
     $bytes[49413] = 0
+}
+
+Write-CorruptFixture -Name "CorruptBlockRange.tmp" -Mutate {
+    param([byte[]]$bytes)
+    $invalidBlockRef = [int](($bytes.Length - 512) / 256) + 1
+    [BitConverter]::GetBytes($invalidBlockRef).CopyTo($bytes, 0x20)
+    [BitConverter]::GetBytes($invalidBlockRef).CopyTo($bytes, 0x110)
 }
 
 Write-CorruptFixture -Name "CorruptBlob.tmp" -Mutate {

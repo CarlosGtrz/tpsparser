@@ -133,6 +133,11 @@ Result                LONG
 
 TpsParserType.Kill  PROCEDURE
   CODE
+  SELF.InvalidateMemoChainCache()
+  IF ~SELF.BlockRangeQ &= NULL
+    FREE(SELF.BlockRangeQ)
+  END
+  SELF.BlockRangesReady = FALSE
   IF ~SELF.Src &= NULL
     DISPOSE(SELF.Src)
   END
@@ -241,6 +246,7 @@ Result                    LONG
   IF TableNo = 0
     RETURN SELF.SetLastError(TpsErrTableIndex,'That table does not exist in this file. Details: index=' & pTableIndex & ' tables=' & SELF.Tables())
   END
+  SELF.InvalidateMemoChainCache()
   SELF.CurrentTable = TableNo
   SELF.CurrentRecord = 0
   Result = SELF.ParseTableLayout()
@@ -265,6 +271,7 @@ TpsParserType.Records   PROCEDURE
 TpsParserType.Get   PROCEDURE(LONG pRecordNo)
   CODE
   SELF.EnsureDataRange()
+  SELF.InvalidateMemoChainCache()
   IF pRecordNo < 1
     SELF.CurrentRecord = 0
     RETURN SELF.SetLastError(TpsErrRecordIndex,'That record does not exist in this table. Details: index=' & pRecordNo)
@@ -281,6 +288,7 @@ TpsParserType.Set   PROCEDURE(LONG pRecordNo)
   CODE
   SELF.EnsureDataRange()
   IF pRecordNo = 0
+    SELF.InvalidateMemoChainCache()
     SELF.CurrentRecord = 0
     RETURN SELF.SetLastError(0,'')
   END
@@ -289,6 +297,7 @@ TpsParserType.Set   PROCEDURE(LONG pRecordNo)
 TpsParserType.Next  PROCEDURE
   CODE
   SELF.EnsureDataRange()
+  SELF.InvalidateMemoChainCache()
   IF SELF.DataRangeCount < 1
     SELF.CurrentRecord = 0
     RETURN TRUE
@@ -959,6 +968,9 @@ TpsParserType.GetMemoFieldByNumber  PROCEDURE(LONG pFieldNo)
 Owner                                 LONG
 MemoIndex                             LONG
 RawLen                                LONG
+Copied                                LONG
+CacheIndex                            LONG
+State                                 BYTE
   CODE
   IF SELF.CurrentRecord < 1 OR SELF.CurrentRecord > RECORDS(SELF.DataQ) OR pFieldNo < 1 OR pFieldNo > RECORDS(SELF.FieldQ)
     RETURN ''
@@ -970,15 +982,20 @@ RawLen                                LONG
   MemoIndex = SELF.FieldQ.MemoIndex
   GET(SELF.DataQ,SELF.CurrentRecord)
   Owner = SELF.DataQ.RecordNumber
-  IF ~SELF.MemoIsComplete(Owner,MemoIndex,RawLen) OR RawLen < 1
+  State = SELF.ResolveMemoChain(Owner,MemoIndex,RawLen,CacheIndex)
+  IF State <> TpsMemoStateComplete OR RawLen < 1
     RETURN ''
   END
   IF ~SELF.ReturnBuffer &= NULL
     DISPOSE(SELF.ReturnBuffer)
   END
   SELF.ReturnBuffer &= NEW(STRING(RawLen))
-  RawLen = SELF.CopyMemoRaw(Owner,MemoIndex,SELF.ReturnBuffer,RawLen)
-  IF RawLen < 1
+  IF SELF.ReturnBuffer &= NULL
+    Copied = SELF.SetLastError(TpsErrMemoDef,'There was not enough memory to read the attached text. Details: bytes=' & RawLen)
+    RETURN ''
+  END
+  Copied = SELF.CopyResolvedMemo(CacheIndex,SELF.ReturnBuffer,RawLen)
+  IF Copied <> RawLen
     RETURN ''
   END
   RETURN SELF.ReturnBuffer
@@ -1011,10 +1028,11 @@ TpsParserType.GetMemoStateByNumber PROCEDURE(LONG pFieldNo)
 Owner                                LONG
 MemoIndex                            LONG
 RawLen                               LONG
-First                                LONG
 Prefix                               STRING(TpsBlobLenPrefix)
 Copied                               LONG
 DeclaredLength                       LONG
+CacheIndex                           LONG
+State                                BYTE
   CODE
   Copied = SELF.SetLastError(0,'')
   IF SELF.CurrentRecord < 1 OR SELF.CurrentRecord > RECORDS(SELF.DataQ) OR pFieldNo < 1 OR pFieldNo > RECORDS(SELF.FieldQ)
@@ -1027,11 +1045,11 @@ DeclaredLength                       LONG
   MemoIndex = SELF.FieldQ.MemoIndex
   GET(SELF.DataQ,SELF.CurrentRecord)
   Owner = SELF.DataQ.RecordNumber
-  First = SELF.FindFirstMemoChunk(Owner,MemoIndex)
-  IF First = 0
+  State = SELF.ResolveMemoChain(Owner,MemoIndex,RawLen,CacheIndex)
+  IF State = TpsMemoStateEmpty
     RETURN TpsMemoStateEmpty
   END
-  IF ~SELF.MemoIsComplete(Owner,MemoIndex,RawLen)
+  IF State <> TpsMemoStateComplete
     Copied = SELF.SetLastError(TpsErrMemoDef,'Attached text or file data is incomplete.')
     RETURN TpsMemoStateDamaged
   END
@@ -1041,7 +1059,7 @@ DeclaredLength                       LONG
       Copied = SELF.SetLastError(TpsErrBlobData,'The attached file is shorter than it claims. Details: raw=' & RawLen)
       RETURN TpsMemoStateDamaged
     END
-    Copied = SELF.CopyMemoRaw(Owner,MemoIndex,Prefix,TpsBlobLenPrefix)
+    Copied = SELF.CopyResolvedMemo(CacheIndex,Prefix,TpsBlobLenPrefix)
     IF Copied < TpsBlobLenPrefix
       Copied = SELF.SetLastError(TpsErrBlobData,'The attached file is shorter than it claims. Details: copied=' & Copied & ' raw=' & RawLen)
       RETURN TpsMemoStateDamaged
@@ -1075,8 +1093,9 @@ BlobLen                               LONG
 Avail                                 LONG
 PreviewLen                            LONG
 CopyLen                               LONG
-First                                 LONG
 Raw                                   &STRING
+CacheIndex                            LONG
+State                                 BYTE
   CODE
   pBlobLength = 0
   IF ~SELF.BlobPreviewBuffer &= NULL
@@ -1092,19 +1111,15 @@ Raw                                   &STRING
   MemoIndex = SELF.FieldQ.MemoIndex
   GET(SELF.DataQ,SELF.CurrentRecord)
   Owner = SELF.DataQ.RecordNumber
-  First = SELF.FindFirstMemoChunk(Owner,MemoIndex)
-  IF First = 0
+  State = SELF.ResolveMemoChain(Owner,MemoIndex,RawLen,CacheIndex)
+  IF State = TpsMemoStateEmpty
     RETURN SELF.SetLastError(0,'')
   END
-  GET(SELF.MemoQ,First)
-  IF SELF.MemoQ.Sequence = TpsDamagedMemoSequence
+  IF State <> TpsMemoStateComplete
     IF SELF.IgnoreErrors
       RETURN SELF.SetLastError(0,'')
     END
     RETURN SELF.SetLastError(TpsErrBlobData,'Part of the attached file is damaged.')
-  END
-  IF ~SELF.MemoIsComplete(Owner,MemoIndex,RawLen)
-    RawLen = 0
   END
   IF RawLen = 0
     RETURN SELF.SetLastError(0,'')
@@ -1126,7 +1141,7 @@ Raw                                   &STRING
   IF Raw &= NULL
     RETURN SELF.SetLastError(TpsErrBlobData,'There was not enough memory to read the attached file. Details: bytes=' & CopyLen)
   END
-  CopyLen = SELF.CopyMemoRaw(Owner,MemoIndex,Raw,CopyLen)
+  CopyLen = SELF.CopyResolvedMemo(CacheIndex,Raw,CopyLen)
   IF CopyLen < TpsBlobLenPrefix
     DISPOSE(Raw)
     IF SELF.IgnoreErrors
@@ -1178,9 +1193,13 @@ TpsParserType.Construct PROCEDURE
   CLEAR(SELF.SourceFileName)
   SELF.DataQ &= NEW(TpsDataQueue)
   SELF.MemoQ &= NEW(TpsMemoQueue)
+  SELF.MemoChainQ &= NEW(TpsMemoChainQueue)
+  SELF.MemoPartQ &= NEW(TpsMemoPartQueue)
+  SELF.BlockRangeQ &= NEW(TpsBlockRangeQueue)
   SELF.DataRangeTable = -1
   SELF.ParsedLayoutTable = -1
   SELF.MemoQDirty = TRUE
+  SELF.BlockRangesReady = FALSE
   SELF.TableDefQ &= NEW(TpsTableDefQueue)
   SELF.TableNameQ &= NEW(TpsTableNameQueue)
   SELF.FieldQ &= NEW(TpsFieldQueue)
@@ -1195,6 +1214,15 @@ TpsParserType.Destruct  PROCEDURE
   END
   IF ~SELF.MemoQ &= NULL
     DISPOSE(SELF.MemoQ)
+  END
+  IF ~SELF.MemoChainQ &= NULL
+    DISPOSE(SELF.MemoChainQ)
+  END
+  IF ~SELF.MemoPartQ &= NULL
+    DISPOSE(SELF.MemoPartQ)
+  END
+  IF ~SELF.BlockRangeQ &= NULL
+    DISPOSE(SELF.BlockRangeQ)
   END
   IF ~SELF.TableDefQ &= NULL
     DISPOSE(SELF.TableDefQ)
@@ -1230,6 +1258,7 @@ TpsParserType.RollbackMemos PROCEDURE(LONG pKeep)
 I                            LONG
   CODE
   IF RECORDS(SELF.MemoQ) > pKeep
+    SELF.InvalidateMemoChainCache()
     SELF.MemoQDirty = TRUE
   END
   LOOP I = RECORDS(SELF.MemoQ) TO pKeep + 1 BY -1
@@ -1703,14 +1732,20 @@ TopSpeed                  STRING(TpsSignatureLen)
   END
   RETURN 0
 
-TpsParserType.ParseAllBlocks PROCEDURE
+TpsParserType.BuildBlockRangeCache PROCEDURE
 I                         LONG
 StartRef                  LONG
 EndRef                    LONG
 StartOfs                  LONG
 EndOfs                    LONG
-Result                    LONG
+MaxRef                    LONG
+CacheError                LONG
   CODE
+  IF SELF.BlockRangesReady
+    RETURN 0
+  END
+  FREE(SELF.BlockRangeQ)
+  MaxRef = (SELF.SrcLen - TpsFirstPageOffset) / BSHIFT(1,TpsBlockAddrShift)
   LOOP I = 0 TO ((TpsBlockEndTable - TpsBlockStartTable) / 4) - 1
     StartRef = SELF.ReadLeLong(SELF.Src,TpsBlockStartTable + (I * 4))
     EndRef = SELF.ReadLeLong(SELF.Src,TpsBlockEndTable + (I * 4))
@@ -1721,20 +1756,44 @@ Result                    LONG
       END
       RETURN SELF.SetLastError(TpsErrBlockRange,'The file structure is damaged. Details: negative block reference block=' & I)
     END
-    StartOfs = BSHIFT(StartRef,TpsBlockAddrShift) + TpsFirstPageOffset
-    EndOfs = BSHIFT(EndRef,TpsBlockAddrShift) + TpsFirstPageOffset
-    IF StartOfs = TpsFirstPageOffset AND EndOfs = TpsFirstPageOffset
+    IF StartRef = 0 AND EndRef = 0
       CYCLE
     END
-    IF StartOfs < TpsFirstPageOffset OR EndOfs < StartOfs OR EndOfs > SELF.SrcLen
+    IF StartRef > MaxRef OR EndRef > MaxRef OR EndRef < StartRef
       IF SELF.IgnoreErrors
         SELF.RecoveryIssues += 1
         CYCLE
       END
-      RETURN SELF.SetLastError(TpsErrBlockRange,'The file structure is damaged. Details: block start=' & StartOfs & ' end=' & EndOfs & ' bytes=' & SELF.SrcLen)
+      RETURN SELF.SetLastError(TpsErrBlockRange,'The file structure is damaged. Details: block=' & I & ' start ref=' & StartRef & ' end ref=' & EndRef & ' bytes=' & SELF.SrcLen)
     END
-    IF StartOfs < SELF.SrcLen
-      Result = SELF.ParseBlock(StartOfs,EndOfs)
+    StartOfs = BSHIFT(StartRef,TpsBlockAddrShift) + TpsFirstPageOffset
+    EndOfs = BSHIFT(EndRef,TpsBlockAddrShift) + TpsFirstPageOffset
+    CLEAR(SELF.BlockRangeQ)
+    SELF.BlockRangeQ.BlockNo = I
+    SELF.BlockRangeQ.StartOfs = StartOfs
+    SELF.BlockRangeQ.EndOfs = EndOfs
+    ADD(SELF.BlockRangeQ)
+    IF ERRORCODE()
+      CacheError = ERRORCODE()
+      FREE(SELF.BlockRangeQ)
+      RETURN SELF.SetLastError(CacheError,'Could not cache a validated TPS block range. Details: block=' & I)
+    END
+  END
+  SELF.BlockRangesReady = TRUE
+  RETURN 0
+
+TpsParserType.ParseAllBlocks PROCEDURE
+I                         LONG
+Result                    LONG
+  CODE
+  Result = SELF.BuildBlockRangeCache()
+  IF Result <> 0
+    RETURN Result
+  END
+  LOOP I = 1 TO RECORDS(SELF.BlockRangeQ)
+    GET(SELF.BlockRangeQ,I)
+    IF SELF.BlockRangeQ.StartOfs < SELF.SrcLen
+      Result = SELF.ParseBlock(SELF.BlockRangeQ.StartOfs,SELF.BlockRangeQ.EndOfs)
       IF Result <> 0 AND ~SELF.IgnoreErrors
         RETURN Result
       END
@@ -2918,6 +2977,7 @@ I                               LONG
   END
   IF SELF.CurrentRecord < SELF.DataRangeFirst OR |
       SELF.CurrentRecord >= SELF.DataRangeFirst + SELF.DataRangeCount
+    SELF.InvalidateMemoChainCache()
     SELF.CurrentRecord = 0
   END
 
@@ -2932,6 +2992,7 @@ TpsParserType.EnsureMemoQSorted PROCEDURE
   IF ~SELF.MemoQDirty
     RETURN
   END
+  SELF.InvalidateMemoChainCache()
   SORT(SELF.MemoQ,+SELF.MemoQ.TableNo,+SELF.MemoQ.Owner,+SELF.MemoQ.MemoIndex,+SELF.MemoQ.Sequence,+SELF.MemoQ.Arrival)
   SELF.MemoQDirty = FALSE
 
@@ -2983,77 +3044,173 @@ Found                                 LONG
   END
   RETURN Found
 
-TpsParserType.MemoIsComplete PROCEDURE(LONG pOwner,LONG pMemoIndex,*LONG pRawLen)
-I                              LONG
-J                              LONG
-Last                           LONG
-Expected                       LONG
-Found                          BYTE
+TpsParserType.FindMemoChainCache PROCEDURE(LONG pOwner,LONG pMemoIndex)
+I                                  LONG
+  CODE
+  LOOP I = 1 TO RECORDS(SELF.MemoChainQ)
+    GET(SELF.MemoChainQ,I)
+    IF SELF.MemoChainQ.TableNo = SELF.CurrentTable AND |
+        SELF.MemoChainQ.Owner = pOwner AND |
+        SELF.MemoChainQ.MemoIndex = pMemoIndex
+      RETURN I
+    END
+  END
+  RETURN 0
+
+TpsParserType.ResolveMemoChain PROCEDURE(LONG pOwner,LONG pMemoIndex,*LONG pRawLen,*LONG pCacheIndex)
+I                                LONG
+J                                LONG
+Last                             LONG
+Expected                         LONG
+PartFirst                        LONG
+PartCount                        LONG
+CacheError                       LONG
+Found                            BYTE
+State                            BYTE
   CODE
   pRawLen = 0
+  pCacheIndex = 0
+  SELF.EnsureMemoQSorted()
+  pCacheIndex = SELF.FindMemoChainCache(pOwner,pMemoIndex)
+  IF pCacheIndex > 0
+    GET(SELF.MemoChainQ,pCacheIndex)
+    pRawLen = SELF.MemoChainQ.RawLen
+    RETURN SELF.MemoChainQ.State
+  END
+  PartFirst = RECORDS(SELF.MemoPartQ) + 1
+  State = TpsMemoStateEmpty
   I = SELF.FindFirstMemoChunk(pOwner,pMemoIndex)
-  LOOP WHILE I > 0 AND I <= RECORDS(SELF.MemoQ)
-    GET(SELF.MemoQ,I)
-    IF SELF.MemoQ.TableNo <> SELF.CurrentTable OR SELF.MemoQ.Owner <> pOwner OR SELF.MemoQ.MemoIndex <> pMemoIndex
-      BREAK
-    END
-    IF SELF.MemoQ.Sequence <> Expected
-      RETURN FALSE
-    END
-    Found = TRUE
-    Last = I
-    J = I + 1
-    LOOP WHILE J <= RECORDS(SELF.MemoQ)
-      GET(SELF.MemoQ,J)
-      IF SELF.MemoQ.TableNo <> SELF.CurrentTable OR SELF.MemoQ.Owner <> pOwner OR SELF.MemoQ.MemoIndex <> pMemoIndex OR SELF.MemoQ.Sequence <> Expected
+  IF I > 0
+    State = TpsMemoStateComplete
+    LOOP WHILE I <= RECORDS(SELF.MemoQ)
+      GET(SELF.MemoQ,I)
+      IF SELF.MemoQ.TableNo <> SELF.CurrentTable OR |
+          SELF.MemoQ.Owner <> pOwner OR |
+          SELF.MemoQ.MemoIndex <> pMemoIndex
         BREAK
       END
-      Last = J
-      J += 1
+      IF SELF.MemoQ.Sequence <> Expected
+        State = TpsMemoStateDamaged
+        BREAK
+      END
+      Found = TRUE
+      Last = I
+      J = I + 1
+      LOOP WHILE J <= RECORDS(SELF.MemoQ)
+        GET(SELF.MemoQ,J)
+        IF SELF.MemoQ.TableNo <> SELF.CurrentTable OR |
+            SELF.MemoQ.Owner <> pOwner OR |
+            SELF.MemoQ.MemoIndex <> pMemoIndex OR |
+            SELF.MemoQ.Sequence <> Expected
+          BREAK
+        END
+        Last = J
+        J += 1
+      END
+      GET(SELF.MemoQ,Last)
+      IF SELF.MemoQ.DataLen < 0 OR SELF.MemoQ.DataLen > 7FFFFFFFH - pRawLen
+        State = TpsMemoStateDamaged
+        BREAK
+      END
+      IF SELF.MemoQ.DataLen > 0
+        IF SELF.MemoQ.Payload &= NULL
+          State = TpsMemoStateDamaged
+          BREAK
+        END
+        IF SELF.MemoQ.DataLen > SIZE(SELF.MemoQ.Payload)
+          State = TpsMemoStateDamaged
+          BREAK
+        END
+      END
+      CLEAR(SELF.MemoPartQ)
+      SELF.MemoPartQ.MemoQIndex = Last
+      ADD(SELF.MemoPartQ)
+      IF ERRORCODE()
+        CacheError = ERRORCODE()
+        State = TpsMemoStateDamaged
+        BREAK
+      END
+      pRawLen += SELF.MemoQ.DataLen
+      Expected += 1
+      I = J
     END
-    GET(SELF.MemoQ,Last)
-    pRawLen += SELF.MemoQ.DataLen
-    Expected += 1
-    I = J
   END
-  RETURN Found
+  IF ~Found AND State = TpsMemoStateComplete
+    State = TpsMemoStateEmpty
+  END
+  PartCount = RECORDS(SELF.MemoPartQ) - PartFirst + 1
+  IF State <> TpsMemoStateComplete
+    LOOP WHILE RECORDS(SELF.MemoPartQ) >= PartFirst
+      GET(SELF.MemoPartQ,RECORDS(SELF.MemoPartQ))
+      DELETE(SELF.MemoPartQ)
+    END
+    PartCount = 0
+    pRawLen = 0
+  END
+  IF CacheError <> 0
+    SELF.InvalidateMemoChainCache()
+    CacheError = SELF.SetLastError(CacheError,'Could not cache a validated TPS MEMO fragment.')
+    RETURN TpsMemoStateDamaged
+  END
+  CLEAR(SELF.MemoChainQ)
+  SELF.MemoChainQ.TableNo = SELF.CurrentTable
+  SELF.MemoChainQ.Owner = pOwner
+  SELF.MemoChainQ.MemoIndex = pMemoIndex
+  SELF.MemoChainQ.State = State
+  SELF.MemoChainQ.RawLen = pRawLen
+  SELF.MemoChainQ.PartFirst = PartFirst
+  SELF.MemoChainQ.PartCount = PartCount
+  ADD(SELF.MemoChainQ)
+  IF ERRORCODE()
+    CacheError = ERRORCODE()
+    SELF.InvalidateMemoChainCache()
+    pRawLen = 0
+    CacheError = SELF.SetLastError(CacheError,'Could not cache a validated TPS MEMO chain.')
+    RETURN TpsMemoStateDamaged
+  END
+  pCacheIndex = RECORDS(SELF.MemoChainQ)
+  RETURN State
 
-TpsParserType.CopyMemoRaw   PROCEDURE(LONG pOwner,LONG pMemoIndex,*STRING pRaw,LONG pMaxLen)
-I                             LONG
-J                             LONG
-Last                          LONG
-Expected                      LONG
-RawLen                        LONG
-CopyLen                       LONG
-CompleteLen                   LONG
+TpsParserType.CopyResolvedMemo PROCEDURE(LONG pCacheIndex,*STRING pRaw,LONG pMaxLen)
+I                                LONG
+PartIndex                        LONG
+RawLen                           LONG
+CopyLen                          LONG
   CODE
-  RawLen = 0
-  IF pMaxLen < 1
+  IF pCacheIndex < 1 OR pCacheIndex > RECORDS(SELF.MemoChainQ) OR pMaxLen < 1
     RETURN 0
   END
-  IF ~SELF.MemoIsComplete(pOwner,pMemoIndex,CompleteLen)
+  IF pMaxLen > SIZE(pRaw)
+    pMaxLen = SIZE(pRaw)
+  END
+  GET(SELF.MemoChainQ,pCacheIndex)
+  IF SELF.MemoChainQ.State <> TpsMemoStateComplete
     RETURN 0
   END
-  I = SELF.FindFirstMemoChunk(pOwner,pMemoIndex)
-  LOOP WHILE I > 0 AND I <= RECORDS(SELF.MemoQ)
-    GET(SELF.MemoQ,I)
-    IF SELF.MemoQ.TableNo <> SELF.CurrentTable OR SELF.MemoQ.Owner <> pOwner OR SELF.MemoQ.MemoIndex <> pMemoIndex
+  LOOP I = 0 TO SELF.MemoChainQ.PartCount - 1
+    IF RawLen >= pMaxLen
       BREAK
     END
-    IF SELF.MemoQ.Sequence <> Expected
+    PartIndex = SELF.MemoChainQ.PartFirst + I
+    IF PartIndex < 1 OR PartIndex > RECORDS(SELF.MemoPartQ)
       RETURN 0
     END
-    Last = I
-    J = I + 1
-    LOOP WHILE J <= RECORDS(SELF.MemoQ)
-      GET(SELF.MemoQ,J)
-      IF SELF.MemoQ.TableNo <> SELF.CurrentTable OR SELF.MemoQ.Owner <> pOwner OR SELF.MemoQ.MemoIndex <> pMemoIndex OR SELF.MemoQ.Sequence <> Expected
-        BREAK
-      END
-      Last = J
-      J += 1
+    GET(SELF.MemoPartQ,PartIndex)
+    IF SELF.MemoPartQ.MemoQIndex < 1 OR SELF.MemoPartQ.MemoQIndex > RECORDS(SELF.MemoQ)
+      RETURN 0
     END
-    GET(SELF.MemoQ,Last)
+    GET(SELF.MemoQ,SELF.MemoPartQ.MemoQIndex)
+    IF SELF.MemoQ.DataLen < 0
+      RETURN 0
+    END
+    IF SELF.MemoQ.DataLen > 0
+      IF SELF.MemoQ.Payload &= NULL
+        RETURN 0
+      END
+      IF SELF.MemoQ.DataLen > SIZE(SELF.MemoQ.Payload)
+        RETURN 0
+      END
+    END
     IF RawLen < pMaxLen
       CopyLen = SELF.MemoQ.DataLen
       IF CopyLen > pMaxLen - RawLen
@@ -3064,10 +3221,17 @@ CompleteLen                   LONG
         RawLen += CopyLen
       END
     END
-    Expected += 1
-    I = J
   END
   RETURN RawLen
+
+TpsParserType.InvalidateMemoChainCache PROCEDURE
+  CODE
+  IF ~SELF.MemoChainQ &= NULL
+    FREE(SELF.MemoChainQ)
+  END
+  IF ~SELF.MemoPartQ &= NULL
+    FREE(SELF.MemoPartQ)
+  END
 
 TpsParserType.SetLastError  PROCEDURE(LONG pError,STRING pText)
 TextLen                       LONG
