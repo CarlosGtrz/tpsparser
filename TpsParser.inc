@@ -161,6 +161,7 @@ Next                  PROCEDURE,BYTE
 GetCurrentRecordNumber PROCEDURE,LONG
 GetCurrentRecordOffset PROCEDURE,LONG
 GetRecoveryIssueCount PROCEDURE,LONG
+GetSourceSize         PROCEDURE,ULONG
 GetSourceEncrypted    PROCEDURE,BYTE
 
 ! Field metadata

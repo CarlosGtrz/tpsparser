@@ -335,6 +335,10 @@ TpsParserType.GetRecoveryIssueCount PROCEDURE
   CODE
   RETURN SELF.RecoveryIssues
 
+TpsParserType.GetSourceSize PROCEDURE
+  CODE
+  RETURN SELF.SrcLen
+
 TpsParserType.GetSourceEncrypted PROCEDURE
   CODE
   RETURN SELF.SourceEncrypted

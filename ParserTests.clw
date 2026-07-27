@@ -122,10 +122,13 @@ Id                   LONG
   RequireString(Parser.GetFieldStringMaskByNumber(0),'',364)
   RequireString(Parser.GetExternalNameByNumber(0),'',365)
   RequireString(Parser.GetKeyExternalName(0),'',366)
+  RequireLong(Parser.GetSourceSize(),60160,391)
   Parser.Kill()
+  RequireLong(Parser.GetSourceSize(),0,392)
 
   Result = Parser.Init('tests\fixtures\COMPREHENSIVE.TPS')
   RequireLong(Result,0,10)
+  RequireLong(Parser.GetSourceSize(),60160,393)
   RequireLong(Parser.GetSourceEncrypted(),FALSE,367)
   RequireLong(Parser.GetRecoveryIssueCount(),0,368)
   RequireLong(Parser.Tables(),1,11)

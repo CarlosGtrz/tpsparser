@@ -243,6 +243,7 @@ RecordCount = Parser.Records()
 RecordId    = Parser.GetCurrentRecordNumber()
 PageOffset  = Parser.GetCurrentRecordOffset()
 RecordBytes = Parser.GetRecordLength()
+SourceBytes = Parser.GetSourceSize()
 FieldCount  = Parser.Fields()
 FieldName   = Parser.GetFieldNameByNumber(1)
 FieldType   = Parser.GetFieldType('Name')
@@ -261,8 +262,9 @@ ErrorText   = Parser.GetError()
 ```
 
 `GetRecordLength()` is the record length declared by the currently selected
-table. Field offsets and key component field indexes are zero-based TPS
-metadata values. `TpsFormat.inc` exposes the corresponding `TpsField...`,
+table. `GetSourceSize()` returns the loaded TPS source size in bytes, or `0`
+after `Kill()`. Field offsets and key component field indexes are zero-based
+TPS metadata values. `TpsFormat.inc` exposes the corresponding `TpsField...`,
 `TpsMemo...`, `TpsBlob...`, and `TpsKey...` equates.
 
 MEMO/BLOB metadata is available through
