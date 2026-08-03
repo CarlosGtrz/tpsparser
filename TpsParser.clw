@@ -355,6 +355,14 @@ TpsParserType.GetFieldNameByNumber  PROCEDURE(LONG pFieldNo)
   GET(SELF.FieldQ,pFieldNo)
   RETURN CLIP(SELF.FieldQ.ShortName)
 
+TpsParserType.GetFieldQualifiedNameByNumber PROCEDURE(LONG pFieldNo)
+  CODE
+  IF pFieldNo < 1 OR pFieldNo > RECORDS(SELF.FieldQ)
+    RETURN ''
+  END
+  GET(SELF.FieldQ,pFieldNo)
+  RETURN CLIP(SELF.FieldQ.Name)
+
 TpsParserType.GetFieldType  PROCEDURE(STRING pFieldName)
   CODE
   RETURN SELF.GetFieldTypeByNumber(SELF.GetFieldNumber(pFieldName))

@@ -167,6 +167,7 @@ GetSourceEncrypted    PROCEDURE,BYTE
 ! Field metadata
 Fields                PROCEDURE,LONG
 GetFieldNameByNumber  PROCEDURE(LONG pFieldNo),STRING
+GetFieldQualifiedNameByNumber PROCEDURE(LONG pFieldNo),STRING
 GetFieldType          PROCEDURE(STRING pFieldName),STRING
 GetFieldTypeByNumber  PROCEDURE(LONG pFieldNo),STRING
 GetFieldTypeCodeByNumber PROCEDURE(LONG pFieldNo),LONG
